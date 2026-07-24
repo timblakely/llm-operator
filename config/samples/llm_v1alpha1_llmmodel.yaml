@@ -1,0 +1,193 @@
+apiVersion: llm.cogito.dev/v1alpha1
+kind: LLMModel
+metadata:
+  name: gemma-4-31b-it-qat-w4a16-ct
+  namespace: llm
+spec:
+  model:
+    name: google/gemma-4-31B-it-qat-w4a16-ct
+    source: google/gemma-4-31B-it-qat-w4a16-ct
+    revision: 52f3f65bc7a02d555763bc923bd1d9094898219d
+  serving:
+    backend: vllm
+    displayName: "Gemma 4 31B IT QAT W4A16 (Google, Compressed Tensors)"
+    maxModelLen: 229376
+    args:
+      - --disable-custom-all-reduce
+      - --tensor-parallel-size
+      - "2"
+      - --pipeline-parallel-size
+      - "1"
+      - --kv-cache-dtype
+      - auto
+      - --max-model-len
+      - "229376"
+      - --gpu-memory-utilization
+      - "0.95"
+      - --max-num-seqs
+      - "2"
+      - --max-num-batched-tokens
+      - "4096"
+      - --trust-remote-code
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - gemma4
+      - --reasoning-parser
+      - gemma4
+      - --override-generation-config
+      - '{"temperature": 1.0, "top_p": 0.95, "top_k": 64, "min_p": 0.0, "repetition_penalty": 1.0}'
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+---
+apiVersion: llm.cogito.dev/v1alpha1
+kind: LLMModel
+metadata:
+  name: gemma-4-31b-qat-awq-int4
+  namespace: llm
+spec:
+  model:
+    name: cyankiwi/gemma-4-31B-it-qat-AWQ-INT4
+    source: cyankiwi/gemma-4-31B-it-qat-AWQ-INT4
+    revision: e0814036cbe43ee2315aafaede0c3454c74b71d3
+  serving:
+    backend: vllm
+    displayName: "Gemma 4 31B IT QAT AWQ INT4"
+    maxModelLen: 229376
+    args:
+      - --disable-custom-all-reduce
+      - --tensor-parallel-size
+      - "2"
+      - --pipeline-parallel-size
+      - "1"
+      - --kv-cache-dtype
+      - auto
+      - --max-model-len
+      - "229376"
+      - --gpu-memory-utilization
+      - "0.95"
+      - --max-num-seqs
+      - "2"
+      - --max-num-batched-tokens
+      - "4096"
+      - --trust-remote-code
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - gemma4
+      - --reasoning-parser
+      - gemma4
+      - --chat-template
+      - /vllm-workspace/examples/tool_chat_template_gemma4.jinja
+      - --enable-prefix-caching
+      - --override-generation-config
+      - '{"temperature": 1.0, "top_p": 0.95, "top_k": 64, "min_p": 0.0, "repetition_penalty": 1.0}'
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+---
+apiVersion: llm.cogito.dev/v1alpha1
+kind: LLMModel
+metadata:
+  name: qwen-3-6-27b-autoround
+  namespace: llm
+spec:
+  model:
+    name: Lorbus/Qwen3.6-27B-int4-AutoRound
+    source: Lorbus/Qwen3.6-27B-int4-AutoRound
+    revision: c3aea2d531678621989e5e2db034e32b22536e79
+  serving:
+    backend: vllm
+    displayName: "Qwen 3.6 27B INT4 AutoRound"
+    maxModelLen: 262144
+    args:
+      - --disable-custom-all-reduce
+      - --quantization
+      - auto_round
+      - --dtype
+      - float16
+      - --tensor-parallel-size
+      - "2"
+      - --pipeline-parallel-size
+      - "1"
+      - --max-model-len
+      - "262144"
+      - --gpu-memory-utilization
+      - "0.92"
+      - --max-num-seqs
+      - "2"
+      - --max-num-batched-tokens
+      - "8192"
+      - --kv-cache-dtype
+      - fp8_e5m2
+      - --trust-remote-code
+      - --reasoning-parser
+      - qwen3
+      - --default-chat-template-kwargs
+      - '{"enable_thinking": false}'
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - qwen3_coder
+      - --enable-prefix-caching
+      - --enable-chunked-prefill
+      - --speculative-config
+      - '{"method": "mtp", "num_speculative_tokens": 3}'
+      - --override-generation-config
+      - '{"temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "repetition_penalty": 1.0}'
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+---
+apiVersion: llm.cogito.dev/v1alpha1
+kind: LLMModel
+metadata:
+  name: laguna-s-2-1-q4
+  namespace: llm
+spec:
+  model:
+    name: poolside/Laguna-S-2.1
+    source: /models/laguna/laguna-s-2.1-Q4_K_M.gguf
+    revision: 92b968eeba0fbb790ef4216e2a70ef079ed19b07
+    artifactRepository: poolside/Laguna-S-2.1-GGUF
+  artifact:
+    expectedSize: 60Gi
+    files:
+      - laguna-s-2.1-Q4_K_M.gguf
+      - laguna-s-2.1-DFlash-BF16.gguf
+  serving:
+    backend: llama-cpp
+    displayName: "Laguna S 2.1 Q4 (llama.cpp hybrid MoE)"
+    maxModelLen: 102400
+    args:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --jinja
+      - --ctx-size
+      - "102400"
+      - --parallel
+      - "1"
+      - -t
+      - "22"
+      - -ngl
+      - "999"
+      - --split-mode
+      - layer
+      - --flash-attn
+      - "on"
+      - --cache-type-k
+      - q8_0
+      - --cache-type-v
+      - q8_0
+      - --no-mmap
+      - -md
+      - /models/laguna/laguna-s-2.1-DFlash-BF16.gguf
+      - --spec-type
+      - draft-dflash
+      - --spec-draft-n-max
+      - "15"
+      - --override-tensor
+      - 'blk\.(26|27|28|29|30|31|32|33|34|35|36)\.ffn_(down|gate|up)_exps\.weight=CUDA0,blk\.(37|38|39|40|41|42|43|44|45|46|47)\.ffn_(down|gate|up)_exps\.weight=CUDA1,ffn_(down|gate|up)_exps\.weight=CPU'

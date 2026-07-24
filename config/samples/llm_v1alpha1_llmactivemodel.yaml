@@ -1,0 +1,7 @@
+apiVersion: llm.cogito.dev/v1alpha1
+kind: LLMActiveModel
+metadata:
+  name: default
+  namespace: llm
+spec:
+  modelName: google/gemma-4-31B-it-qat-w4a16-ct

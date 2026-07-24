@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    app.kubernetes.io/name: llm-operator
+  name: llm
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-operator-controller-manager
+  namespace: llm
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: llm-operator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: llm-operator
+    spec:
+      serviceAccountName: llm-operator-controller-manager
+      containers:
+        - name: manager
+          image: ghcr.io/timblakely/llm-operator:latest
+          env:
+            - name: CACHE_MANAGER_URL
+              value: http://cache-manager:8090
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          ports:
+            - containerPort: 8081
+              name: metrics
+              protocol: TCP
+            - containerPort: 8082
+              name: healthz
+              protocol: TCP
+          args:
+            - --leader-elect=true
+            - --health-probe-bind-address=:8082
+            - --metrics-bind-address=:8081

@@ -1,0 +1,39 @@
+apiVersion: llm.cogito.dev/v1alpha1
+kind: LLMBackend
+metadata:
+  name: vllm
+  namespace: llm
+spec:
+  type: vllm
+  deploymentRef:
+    name: llm-vllm
+  containerName: vllm
+  serviceRef:
+    name: llm-vllm
+  port: 8000
+  runtimeClassName: nvidia
+  gpuResources:
+    requests:
+      nvidia.com/gpu: "4"
+    limits:
+      nvidia.com/gpu: "4"
+---
+apiVersion: llm.cogito.dev/v1alpha1
+kind: LLMBackend
+metadata:
+  name: laguna
+  namespace: llm
+spec:
+  type: llama-cpp
+  deploymentRef:
+    name: laguna
+  containerName: laguna
+  serviceRef:
+    name: laguna
+  port: 8000
+  runtimeClassName: nvidia
+  gpuResources:
+    requests:
+      nvidia.com/gpu: "2"
+    limits:
+      nvidia.com/gpu: "2"
