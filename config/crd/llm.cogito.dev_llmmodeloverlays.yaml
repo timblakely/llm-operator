@@ -27,7 +27,7 @@ spec:
       jsonPath: .spec.baseModel
       name: BaseModel
       type: string
-    name: cogitodevv1alpha1
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: LLMModelOverlay is the Schema for the llmmodeloverlays API.
@@ -64,13 +64,7 @@ spec:
                   RequestDefaults merges into client requests before forwarding to the backend.
                   Keys not present in the client request are filled in. Client values always win.
                   Must NOT contain a "model" key (the controller sets this to the base model).
-                format: byte
-                type: string
-                x-kubernetes-validations:
-                - message: requestDefaults must be valid JSON
-                  rule: self.matches(r"""^\{.*\}$""")
-                - message: requestDefaults must not contain a 'model' key
-                  rule: '!(self.to_map().has_key(''model''))'
+                x-kubernetes-preserve-unknown-fields: true
             required:
             - baseModel
             - displayName

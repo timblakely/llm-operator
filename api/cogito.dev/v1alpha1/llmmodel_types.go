@@ -22,11 +22,12 @@ import (
 )
 
 // BackendType identifies the serving runtime.
-// +kubebuilder:validation:Enum=vllm;llama-cpp
+// +kubebuilder:validation:Enum=vllm;sglang;llama-cpp
 type BackendType string
 
 const (
 	BackendVLLM     BackendType = "vllm"
+	BackendSGLang   BackendType = "sglang"
 	BackendLlamaCpp BackendType = "llama-cpp"
 )
 
@@ -46,9 +47,9 @@ const (
 const ModelProtectionFinalizer = "llm.cogito.dev/model-protection"
 
 // LLMModelSpec defines the desired state of LLMModel.
-// +kubebuilder:validation:XValidation:rule="self.serving.backend in ['vllm', 'llama-cpp']",message="backend must be 'vllm' or 'llama-cpp'"
-// +kubebuilder:validation:XValidation:rule="has(self.model) && has(self.model.name) && self.model.name != ”",message="model.name is required"
-// +kubebuilder:validation:XValidation:rule="has(self.model) && has(self.model.source) && self.model.source != ”",message="model.source is required"
+// +kubebuilder:validation:XValidation:rule="self.serving.backend in ['vllm', 'sglang', 'llama-cpp']",message="backend must be 'vllm', 'sglang', or 'llama-cpp'"
+// +kubebuilder:validation:XValidation:rule="has(self.model) && has(self.model.name) && size(self.model.name) > 0",message="model.name is required"
+// +kubebuilder:validation:XValidation:rule="has(self.model) && has(self.model.source) && size(self.model.source) > 0",message="model.source is required"
 // +kubebuilder:object:generate=true
 type LLMModelSpec struct {
 	// Model identity.
@@ -72,7 +73,7 @@ type LLMModelRef struct {
 	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9._/-]+$`
 	Name string `json:"name"`
 
-	// Source is the artifact location: HF repo ID for vllm, local path for llama-cpp.
+	// Source is the artifact location: HF repo ID for vLLM/SGLang, local path for llama.cpp.
 	// +kubebuilder:validation:MinLength=1
 	Source string `json:"source"`
 
@@ -96,8 +97,8 @@ type ArtifactSpec struct {
 // ServingSpec describes the serving configuration for a model.
 // +kubebuilder:object:generate=true
 type ServingSpec struct {
-	// Backend is the serving runtime: "vllm" or "llama-cpp".
-	// +kubebuilder:validation:Enum=vllm;llama-cpp
+	// Backend is the serving runtime: "vllm", "sglang", or "llama-cpp".
+	// +kubebuilder:validation:Enum=vllm;sglang;llama-cpp
 	Backend BackendType `json:"backend"`
 
 	// DisplayName is a human-readable label.
@@ -107,8 +108,18 @@ type ServingSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	MaxModelLen int `json:"maxModelLen"`
 
+	// ToolCallParser is a portable tool-call parser selection. The selected
+	// backend driver translates it to the runtime's native configuration.
+	ToolCallParser string `json:"toolCallParser,omitempty"`
+
+	// ReasoningParser is a portable reasoning parser selection. The selected
+	// backend driver translates it to the runtime's native configuration.
+	ReasoningParser string `json:"reasoningParser,omitempty"`
+
 	// Args are backend-specific CLI arguments. Model name, revision, and served-model-name
-	// are injected by the controller and must NOT be included here.
+	// are injected by the controller and must NOT be included here. Existing raw parser
+	// flags remain supported for backwards compatibility; do not mix them with the
+	// corresponding structured parser field.
 	Args []string `json:"args"`
 }
 
@@ -137,7 +148,7 @@ type RuntimeMetadata struct {
 // +kubebuilder:object:generate=true
 type LLMModelStatus struct {
 	// Phase is the high-level lifecycle state.
-	Phase LLMModelPhase `json:"phase"`
+	Phase LLMModelPhase `json:"phase,omitempty"`
 
 	// Active indicates this model is currently served by a backend.
 	Active bool `json:"active"`

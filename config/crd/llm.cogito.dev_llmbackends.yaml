@@ -35,7 +35,7 @@ spec:
       jsonPath: .status.replicas
       name: Replicas
       type: integer
-    name: cogitodevv1alpha1
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: LLMBackend is the Schema for the llmbackends API.
@@ -113,9 +113,10 @@ spec:
                 type: object
                 x-kubernetes-map-type: atomic
               type:
-                description: 'Type is the backend runtime: "vllm" or "llama-cpp".'
+                description: 'Type is the backend runtime: "vllm", "sglang", or "llama-cpp".'
                 enum:
                 - vllm
+                - sglang
                 - llama-cpp
                 type: string
             required:
@@ -126,8 +127,8 @@ spec:
             - type
             type: object
             x-kubernetes-validations:
-            - message: type must be 'vllm' or 'llama-cpp'
-              rule: self.type in ['vllm', 'llama-cpp']
+            - message: type must be 'vllm', 'sglang', or 'llama-cpp'
+              rule: self.type in ['vllm', 'sglang', 'llama-cpp']
             - message: port must be greater than 0
               rule: self.port > 0
           status:
@@ -220,7 +221,6 @@ spec:
                 type: integer
             required:
             - availableReplicas
-            - phase
             - replicas
             type: object
         type: object

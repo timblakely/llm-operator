@@ -6,10 +6,7 @@ metadata:
 spec:
   displayName: "Gemma 4 Agentic"
   baseModel: google/gemma-4-31B-it-qat-w4a16-ct
-  requestDefaults: |
-    {
-      "chat_template_kwargs": {
-        "enable_thinking": true,
-        "preserve_thinking": true
-      }
-    }
+  requestDefaults:
+    chat_template_kwargs:
+      enable_thinking: true
+      preserve_thinking: true

@@ -19,7 +19,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -36,6 +35,7 @@ import (
 	logr "github.com/go-logr/logr"
 
 	cogitodevv1alpha1 "github.com/timblakely/llm-operator/api/cogito.dev/v1alpha1"
+	"github.com/timblakely/llm-operator/internal/backend"
 )
 
 const (
@@ -107,7 +107,7 @@ func (r *LLMModelReconciler) reconcileModel(ctx context.Context, model *cogitode
 
 	// Validate args don't contain injected flags
 	if err := validateArgs(model); err != nil {
-		setCondition(&model.Status, ModelConfiguredCondition, metav1.ConditionFalse, "InvalidArgs", err.Error())
+		setCondition(&model.Status, ModelConfiguredCondition, metav1.ConditionFalse, "InvalidServingConfiguration", err.Error())
 		model.Status.Phase = cogitodevv1alpha1.ModelPhaseFailed
 		if updateErr := r.Status().Update(ctx, model); updateErr != nil {
 			return ctrl.Result{}, fmt.Errorf("update status: %w", updateErr)
@@ -157,40 +157,20 @@ func (r *LLMModelReconciler) resolveBackend(ctx context.Context, model *cogitode
 
 // validateArgs checks that the model args don't contain controller-injected flags.
 func validateArgs(model *cogitodevv1alpha1.LLMModel) error {
-	var injectedFlags []string
-	switch model.Spec.Serving.Backend {
-	case cogitodevv1alpha1.BackendVLLM:
-		injectedFlags = []string{"--model", "--revision", "--served-model-name"}
-	case cogitodevv1alpha1.BackendLlamaCpp:
-		injectedFlags = []string{"-m", "--model", "--alias"}
+	driver, err := backend.DefaultRegistry().Driver(model.Spec.Serving.Backend)
+	if err != nil {
+		return err
 	}
-
-	for _, arg := range model.Spec.Serving.Args {
-		for _, flag := range injectedFlags {
-			if arg == flag || strings.HasPrefix(arg, flag+"=") || strings.HasPrefix(arg, flag+" ") {
-				return fmt.Errorf("arg %q is a controller-injected flag and must not be in spec.serving.args", arg)
-			}
-		}
-	}
-	return nil
+	return driver.Validate(model)
 }
 
 // effectiveArgs returns the full args list with controller-injected flags.
 func effectiveArgs(model *cogitodevv1alpha1.LLMModel) []string {
-	args := make([]string, len(model.Spec.Serving.Args))
-	copy(args, model.Spec.Serving.Args)
-
-	switch model.Spec.Serving.Backend {
-	case cogitodevv1alpha1.BackendVLLM:
-		args = append(args, "--model", model.Spec.Model.Source)
-		if model.Spec.Model.Revision != "" {
-			args = append(args, "--revision", model.Spec.Model.Revision)
-		}
-		args = append(args, "--served-model-name", model.Spec.Model.Name)
-	case cogitodevv1alpha1.BackendLlamaCpp:
-		args = append(args, "-m", model.Spec.Model.Source)
+	driver, err := backend.DefaultRegistry().Driver(model.Spec.Serving.Backend)
+	if err != nil {
+		return append([]string(nil), model.Spec.Serving.Args...)
 	}
-	return args
+	return driver.EffectiveArgs(model)
 }
 
 func (r *LLMModelReconciler) SetupWithManager(mgr ctrl.Manager) error {

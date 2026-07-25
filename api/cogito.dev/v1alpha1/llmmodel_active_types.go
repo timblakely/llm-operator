@@ -45,10 +45,10 @@ type LLMActiveModelStatus struct {
 	ModelName string `json:"modelName"`
 
 	// BackendType is the backend currently serving the active model.
-	BackendType BackendType `json:"backendType"`
+	BackendType BackendType `json:"backendType,omitempty"`
 
 	// Phase describes the transition state.
-	Phase LLMActiveModelPhase `json:"phase"`
+	Phase LLMActiveModelPhase `json:"phase,omitempty"`
 
 	// TransitionFrom is the previous model (if switching).
 	TransitionFrom string `json:"transitionFrom,omitempty"`
@@ -58,6 +58,10 @@ type LLMActiveModelStatus struct {
 
 	// TransitionDuration is how long the last transition took.
 	TransitionDuration *metav1.Duration `json:"transitionDuration,omitempty"`
+
+	// TransitionGeneration identifies the spec generation currently being
+	// transitioned. A reconcile aborts when this token no longer matches.
+	TransitionGeneration int64 `json:"transitionGeneration,omitempty"`
 
 	// Conditions track health.
 	Conditions []metav1.Condition `json:"conditions,omitempty"`

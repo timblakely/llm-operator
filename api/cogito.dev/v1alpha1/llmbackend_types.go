@@ -40,11 +40,11 @@ type GPUResourceRequirements struct {
 }
 
 // LLMBackendSpec defines the desired state of LLMBackend.
-// +kubebuilder:validation:XValidation:rule="self.type in ['vllm', 'llama-cpp']",message="type must be 'vllm' or 'llama-cpp'"
+// +kubebuilder:validation:XValidation:rule="self.type in ['vllm', 'sglang', 'llama-cpp']",message="type must be 'vllm', 'sglang', or 'llama-cpp'"
 // +kubebuilder:validation:XValidation:rule="self.port > 0",message="port must be greater than 0"
 // +kubebuilder:object:generate=true
 type LLMBackendSpec struct {
-	// Type is the backend runtime: "vllm" or "llama-cpp".
+	// Type is the backend runtime: "vllm", "sglang", or "llama-cpp".
 	Type BackendType `json:"type"`
 
 	// DeploymentRef points to the Kubernetes Deployment that runs this backend.
@@ -71,7 +71,7 @@ type LLMBackendSpec struct {
 // +kubebuilder:object:generate=true
 type LLMBackendStatus struct {
 	// Phase indicates backend health.
-	Phase LLMBackendPhase `json:"phase"`
+	Phase LLMBackendPhase `json:"phase,omitempty"`
 
 	// ActiveModel is the model currently served by this backend (if any).
 	ActiveModel string `json:"activeModel,omitempty"`

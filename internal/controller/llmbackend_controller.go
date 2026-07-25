@@ -32,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	cogitodevv1alpha1 "github.com/timblakely/llm-operator/api/cogito.dev/v1alpha1"
+	runtimebackend "github.com/timblakely/llm-operator/internal/backend"
 )
 
 const (
@@ -75,26 +76,37 @@ func (r *LLMBackendReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	backend.Status.Replicas = deployment.Status.Replicas
 	backend.Status.AvailableReplicas = deployment.Status.AvailableReplicas
 
+	// Read active model from Deployment annotations
+	if annotations := deployment.Spec.Template.Annotations; annotations != nil {
+		if activeModel, ok := annotations["llm.cogito.dev/active-model"]; ok {
+			backend.Status.ActiveModel = activeModel
+			if switchedAt, ok := annotations["llm.cogito.dev/switched-at"]; ok {
+				if t, err := time.Parse(time.RFC3339Nano, switchedAt); err == nil {
+					backend.Status.ActiveModelSince = &metav1.Time{Time: t}
+				}
+			}
+		}
+	}
+
 	// Health check
 	if r.HTTPClient != nil && backend.Status.AvailableReplicas > 0 {
-		healthURL := fmt.Sprintf("http://%s:%d/health", backend.Spec.ServiceRef.Name, backend.Spec.Port)
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
-		if err == nil {
-			resp, err := r.HTTPClient.Do(req)
-			if err == nil {
-				resp.Body.Close()
-				if resp.StatusCode == http.StatusOK {
-					setBackendCondition(&backend.Status, BackendHealthyCondition, metav1.ConditionTrue, "Healthy", "Backend is healthy")
-					setBackendCondition(&backend.Status, ModelLoadedCondition, metav1.ConditionTrue, "Loaded", "Model is loaded")
-					backend.Status.Phase = cogitodevv1alpha1.BackendPhaseServing
-				} else {
-					setBackendCondition(&backend.Status, BackendHealthyCondition, metav1.ConditionFalse, "Unhealthy", fmt.Sprintf("Health check returned %d", resp.StatusCode))
-					backend.Status.Phase = cogitodevv1alpha1.BackendPhaseStarting
-				}
-			} else {
-				setBackendCondition(&backend.Status, BackendHealthyCondition, metav1.ConditionFalse, "Unreachable", err.Error())
-				backend.Status.Phase = cogitodevv1alpha1.BackendPhaseStarting
+		driver, driverErr := runtimebackend.DefaultRegistry().Driver(backend.Spec.Type)
+		if driverErr != nil {
+			setBackendCondition(&backend.Status, BackendHealthyCondition, metav1.ConditionFalse, "UnsupportedBackend", driverErr.Error())
+			backend.Status.Phase = cogitodevv1alpha1.BackendPhaseFailed
+			if err := r.Status().Update(ctx, &backend); err != nil {
+				return ctrl.Result{}, err
 			}
+			return ctrl.Result{}, nil
+		}
+		backendURL := fmt.Sprintf("http://%s:%d", backend.Spec.ServiceRef.Name, backend.Spec.Port)
+		if err := driver.CheckHealth(ctx, r.HTTPClient, backendURL); err == nil {
+			setBackendCondition(&backend.Status, BackendHealthyCondition, metav1.ConditionTrue, "Healthy", "Backend is healthy")
+			setBackendCondition(&backend.Status, ModelLoadedCondition, metav1.ConditionTrue, "Loaded", "Model is loaded")
+			backend.Status.Phase = cogitodevv1alpha1.BackendPhaseServing
+		} else {
+			setBackendCondition(&backend.Status, BackendHealthyCondition, metav1.ConditionFalse, "Unhealthy", err.Error())
+			backend.Status.Phase = cogitodevv1alpha1.BackendPhaseStarting
 		}
 	} else if backend.Status.AvailableReplicas == 0 {
 		setBackendCondition(&backend.Status, BackendHealthyCondition, metav1.ConditionFalse, "NoReplicas", "No available replicas")

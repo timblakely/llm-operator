@@ -38,7 +38,7 @@ spec:
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
-    name: cogitodevv1alpha1
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: LLMModel is the Schema for the llmmodels API.
@@ -110,7 +110,7 @@ spec:
                     type: string
                   source:
                     description: 'Source is the artifact location: HF repo ID for
-                      vllm, local path for llama-cpp.'
+                      vLLM/SGLang, local path for llama.cpp.'
                     minLength: 1
                     type: string
                 required:
@@ -123,7 +123,9 @@ spec:
                   args:
                     description: |-
                       Args are backend-specific CLI arguments. Model name, revision, and served-model-name
-                      are injected by the controller and must NOT be included here.
+                      are injected by the controller and must NOT be included here. Existing raw parser
+                      flags remain supported for backwards compatibility; do not mix them with the
+                      corresponding structured parser field.
                     items:
                       type: string
                     type: array
@@ -131,11 +133,14 @@ spec:
                     allOf:
                     - enum:
                       - vllm
+                      - sglang
                       - llama-cpp
                     - enum:
                       - vllm
+                      - sglang
                       - llama-cpp
-                    description: 'Backend is the serving runtime: "vllm" or "llama-cpp".'
+                    description: 'Backend is the serving runtime: "vllm", "sglang",
+                      or "llama-cpp".'
                     type: string
                   displayName:
                     description: DisplayName is a human-readable label.
@@ -144,6 +149,16 @@ spec:
                     description: MaxModelLen is the maximum context length in tokens.
                     minimum: 1
                     type: integer
+                  reasoningParser:
+                    description: |-
+                      ReasoningParser is a portable reasoning parser selection. The selected
+                      backend driver translates it to the runtime's native configuration.
+                    type: string
+                  toolCallParser:
+                    description: |-
+                      ToolCallParser is a portable tool-call parser selection. The selected
+                      backend driver translates it to the runtime's native configuration.
+                    type: string
                 required:
                 - args
                 - backend
@@ -155,14 +170,14 @@ spec:
             - serving
             type: object
             x-kubernetes-validations:
-            - message: backend must be 'vllm' or 'llama-cpp'
-              rule: self.serving.backend in ['vllm', 'llama-cpp']
+            - message: backend must be 'vllm', 'sglang', or 'llama-cpp'
+              rule: self.serving.backend in ['vllm', 'sglang', 'llama-cpp']
             - message: model.name is required
-              rule: has(self.model) && has(self.model.name) && self.model.name !=
-                ”
+              rule: has(self.model) && has(self.model.name) && size(self.model.name)
+                > 0
             - message: model.source is required
-              rule: has(self.model) && has(self.model.source) && self.model.source
-                != ”
+              rule: has(self.model) && has(self.model.source) && size(self.model.source)
+                > 0
           status:
             description: LLMModelStatus defines the observed state of LLMModel.
             properties:
@@ -283,7 +298,6 @@ spec:
                 type: object
             required:
             - active
-            - phase
             type: object
         type: object
     served: true

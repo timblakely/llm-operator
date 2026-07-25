@@ -55,7 +55,7 @@ func (r *LLMModelOverlayReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	overlay.Status.ObservedGeneration = overlay.GetGeneration()
 
 	// Validate request defaults
-	if err := validateRequestDefaults(overlay.Spec.RequestDefaults); err != nil {
+	if err := validateRequestDefaults(overlay.Spec.RequestDefaults.Raw); err != nil {
 		setOverlayCondition(&overlay.Status, OverlayValidCondition, metav1.ConditionFalse, "InvalidRequestDefaults", err.Error())
 		if err := r.Status().Update(ctx, &overlay); err != nil {
 			return ctrl.Result{}, err
@@ -146,9 +146,11 @@ func (r *LLMModelOverlayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			}
 			var requests []ctrl.Request
 			for _, o := range list.Items {
-				requests = append(requests, ctrl.Request{
-					NamespacedName: client.ObjectKeyFromObject(&o),
-				})
+				if o.Spec.BaseModel == obj.GetName() {
+					requests = append(requests, ctrl.Request{
+						NamespacedName: client.ObjectKeyFromObject(&o),
+					})
+				}
 			}
 			return requests
 		})).

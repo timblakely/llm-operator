@@ -1,1 +1,4 @@
 .pi-subagents
+/bin/
+/testbin/
+/cover.out

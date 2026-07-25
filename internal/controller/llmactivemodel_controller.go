@@ -17,15 +17,13 @@
 package controller
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
-	"strconv"
-	"strings"
+	"sort"
+	"sync"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -36,13 +34,16 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logr "github.com/go-logr/logr"
 
 	cogitodevv1alpha1 "github.com/timblakely/llm-operator/api/cogito.dev/v1alpha1"
+	runtimebackend "github.com/timblakely/llm-operator/internal/backend"
 	"github.com/timblakely/llm-operator/internal/cache"
+	"github.com/timblakely/llm-operator/internal/metrics"
 )
 
 const (
@@ -50,6 +51,7 @@ const (
 	switchedAtAnno           = "llm.cogito.dev/switched-at"
 	backendProbeWait         = 2 * time.Second
 	defaultTransitionTimeout = 30 * time.Minute
+	errTransitionCancelled   = "transition cancelled"
 
 	ModelActiveCondition   = "ModelActive"
 	TransitionCompleteCond = "TransitionComplete"
@@ -63,6 +65,16 @@ type LLMActiveModelReconciler struct {
 	CacheManagerURL   string
 	TransitionTimeout time.Duration
 	HTTPClient        *http.Client
+	// ProbeInterval controls rollout and scale-down polling. The production
+	// default is backendProbeWait; tests may use a shorter interval.
+	ProbeInterval time.Duration
+	// TransitionsEnabled prevents Deployment/cache mutation while the operator
+	// is being evaluated beside the legacy proxy. It must be explicitly enabled.
+	TransitionsEnabled bool
+
+	// transitionMu is a second line of defense around Deployment/cache mutation.
+	// The controller is also configured with MaxConcurrentReconciles=1.
+	transitionMu sync.Mutex
 }
 
 // +kubebuilder:rbac:groups=llm.cogito.dev,resources=llmactivemodels,verbs=get;list;watch;create;update;patch;delete
@@ -82,6 +94,19 @@ func (r *LLMActiveModelReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	activeModel.Status.ObservedGeneration = activeModel.GetGeneration()
+
+	owner, err := r.singletonOwner(ctx, activeModel.Namespace)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if owner != activeModel.Name {
+		activeModel.Status.Phase = cogitodevv1alpha1.ActiveModelPhaseFailed
+		setActiveCondition(&activeModel.Status, ModelActiveCondition, metav1.ConditionFalse, "DuplicateActiveModel", fmt.Sprintf("LLMActiveModel %q owns transitions in namespace %q", owner, activeModel.Namespace))
+		if err := r.Status().Update(ctx, &activeModel); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
 
 	// If already stable with the same model, no-op
 	if activeModel.Status.Phase == cogitodevv1alpha1.ActiveModelPhaseStable &&
@@ -122,8 +147,42 @@ func (r *LLMActiveModelReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, nil
 	}
 
+	if !r.TransitionsEnabled {
+		activeModel.Status.Phase = cogitodevv1alpha1.ActiveModelPhaseTransitioning
+		setActiveCondition(&activeModel.Status, ModelActiveCondition, metav1.ConditionFalse, "TransitionsDisabled", "Model transitions are disabled on this controller manager")
+		if err := r.Status().Update(ctx, &activeModel); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
+
 	// Execute transition
+	r.transitionMu.Lock()
+	defer r.transitionMu.Unlock()
 	return r.executeTransition(ctx, &activeModel, model, backend, logger)
+}
+
+// singletonOwner returns the deterministic transition owner for a namespace.
+// The oldest resource wins, with name as the tie-breaker. Non-owners receive a
+// DuplicateActiveModel condition and periodically retry so deleting the owner
+// allows a remaining resource to take over.
+func (r *LLMActiveModelReconciler) singletonOwner(ctx context.Context, namespace string) (string, error) {
+	var list cogitodevv1alpha1.LLMActiveModelList
+	if err := r.List(ctx, &list, client.InNamespace(namespace)); err != nil {
+		return "", err
+	}
+	if len(list.Items) == 0 {
+		return "", nil
+	}
+	sort.Slice(list.Items, func(i, j int) bool {
+		left := list.Items[i].CreationTimestamp.Time
+		right := list.Items[j].CreationTimestamp.Time
+		if left.Equal(right) {
+			return list.Items[i].Name < list.Items[j].Name
+		}
+		return left.Before(right)
+	})
+	return list.Items[0].Name, nil
 }
 
 func (r *LLMActiveModelReconciler) findModel(ctx context.Context, namespace, modelName string) (*cogitodevv1alpha1.LLMModel, error) {
@@ -169,135 +228,147 @@ func (r *LLMActiveModelReconciler) executeTransition(ctx context.Context, active
 	transitionCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// Mark transitioning
-	if activeModel.Status.Phase != cogitodevv1alpha1.ActiveModelPhaseTransitioning {
+	startGen := activeModel.GetGeneration()
+
+	// Persist a generation token before any external mutation. A Failed state,
+	// a new generation, or an incomplete legacy status starts a fresh attempt.
+	if activeModel.Status.Phase != cogitodevv1alpha1.ActiveModelPhaseTransitioning ||
+		activeModel.Status.TransitionGeneration != startGen ||
+		activeModel.Status.TransitionStarted == nil {
 		activeModel.Status.Phase = cogitodevv1alpha1.ActiveModelPhaseTransitioning
 		activeModel.Status.TransitionFrom = activeModel.Status.ModelName
 		activeModel.Status.TransitionStarted = &metav1.Time{Time: time.Now()}
-		activeModel.Status.BackendType = model.Spec.Serving.Backend
+		activeModel.Status.TransitionGeneration = startGen
 		setActiveCondition(&activeModel.Status, ModelActiveCondition, metav1.ConditionFalse, "Transitioning", "Transition in progress")
 		if err := r.Status().Update(ctx, activeModel); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
 
+	checkCurrent := func() error {
+		return r.ensureTransitionCurrent(transitionCtx, activeModel, model.Spec.Model.Name, startGen)
+	}
+	if err := checkCurrent(); err != nil {
+		return transitionCheckResult(err, logger)
+	}
+	driver, err := runtimebackend.DefaultRegistry().Driver(model.Spec.Serving.Backend)
+	if err != nil {
+		return r.failTransition(ctx, activeModel, model.Spec.Model.Name, "UnsupportedBackend", "unsupported_backend", err)
+	}
+	if err := driver.Validate(model); err != nil {
+		return r.failTransition(ctx, activeModel, model.Spec.Model.Name, "InvalidServingConfiguration", "invalid_serving_configuration", err)
+	}
+
+	previousBackendType := activeModel.Status.BackendType
+	if activeModel.Status.TransitionFrom != "" {
+		if previousModel, err := r.findModel(ctx, activeModel.Namespace, activeModel.Status.TransitionFrom); err == nil {
+			previousBackendType = previousModel.Spec.Serving.Backend
+		}
+	}
+
 	// Step 1: Scale down current backend if different
-	currentBackendType := activeModel.Status.BackendType
+	currentBackendType := previousBackendType
 	if currentBackendType != "" && currentBackendType != model.Spec.Serving.Backend {
 		currentBackend, err := r.findBackend(ctx, activeModel.Namespace, currentBackendType, nil)
 		if err == nil && currentBackend != nil {
+			if err := checkCurrent(); err != nil {
+				return transitionCheckResult(err, logger)
+			}
 			if err := r.scaleDeployment(transitionCtx, currentBackend.Spec.DeploymentRef.Name, activeModel.Namespace, 0); err != nil {
 				logger.Error(err, "failed to scale down current backend")
-				activeModel.Status.Phase = cogitodevv1alpha1.ActiveModelPhaseFailed
-				setActiveCondition(&activeModel.Status, ModelActiveCondition, metav1.ConditionFalse, "ScaleDownFailed", err.Error())
-				_ = r.Status().Update(ctx, activeModel)
-				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+				return r.failTransition(ctx, activeModel, model.Spec.Model.Name, "ScaleDownFailed", "scale_down_failed", err)
 			}
-			if err := r.waitForScaleDown(transitionCtx, currentBackend.Spec.DeploymentRef.Name, activeModel.Namespace); err != nil {
+			if err := r.waitForScaleDown(transitionCtx, currentBackend.Spec.DeploymentRef.Name, activeModel.Namespace, checkCurrent); err != nil {
+				if errors.Is(err, errTransitionChanged) {
+					return transitionCheckResult(err, logger)
+				}
 				logger.Error(err, "timeout waiting for current backend to scale down")
-				return ctrl.Result{RequeueAfter: backendProbeWait}, nil
+				return r.failTransition(ctx, activeModel, model.Spec.Model.Name, "ScaleDownTimeout", "scale_down_timeout", err)
 			}
 			logger.Info("current backend scaled down", "backend", currentBackend.Name)
 		}
 	}
 
-	// Step 2: Ensure cached
-	if r.CacheManagerURL != "" && model.Spec.Artifact != nil {
-		cacheClient := cache.New(r.CacheManagerURL)
-		cacheSpec := cache.CacheSpec{
-			Kind:     string(model.Spec.Serving.Backend),
-			RepoID:   model.Spec.Model.Source,
-			Revision: model.Spec.Model.Revision,
-			Files:    model.Spec.Artifact.Files,
-		}
-		if model.Spec.Artifact.ExpectedSize != "" {
-			if size, err := parseSize(model.Spec.Artifact.ExpectedSize); err == nil {
-				cacheSpec.Size = size
-			}
-		}
+	if err := checkCurrent(); err != nil {
+		return transitionCheckResult(err, logger)
+	}
 
-		result, err := cacheClient.Ensure(transitionCtx, &cache.CacheRequest{
-			Model:   model.Spec.Model.Name,
-			Backend: string(model.Spec.Serving.Backend),
-			Cache:   cacheSpec,
-		})
+	// Step 2: Ensure cached using the target runtime's artifact format.
+	cacheRequest, err := driver.CacheRequest(model)
+	if err != nil {
+		return r.failTransition(ctx, activeModel, model.Spec.Model.Name, "InvalidCacheConfiguration", "invalid_cache_configuration", err)
+	}
+	if r.CacheManagerURL != "" && cacheRequest != nil {
+		cacheClient := cache.NewWithHTTPClient(r.CacheManagerURL, r.httpClient())
+		result, err := cacheClient.Ensure(transitionCtx, cacheRequest)
 		if err != nil {
 			logger.Error(err, "cache ensure failed")
-			activeModel.Status.Phase = cogitodevv1alpha1.ActiveModelPhaseFailed
-			setActiveCondition(&activeModel.Status, ModelActiveCondition, metav1.ConditionFalse, "CacheFailed", err.Error())
-			_ = r.Status().Update(ctx, activeModel)
-			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			return r.failTransition(ctx, activeModel, model.Spec.Model.Name, "CacheFailed", "cache_failed", err)
 		}
 
+		if err := checkCurrent(); err != nil {
+			return transitionCheckResult(err, logger)
+		}
 		// Update cache state on model
 		model.Status.CacheState = &cogitodevv1alpha1.CacheState{
 			Location:     string(result),
 			LastHydrated: &metav1.Time{Time: time.Now()},
 		}
 		setCondition(&model.Status, ArtifactCachedCondition, metav1.ConditionTrue, string(result), "Artifact cached")
-		_ = r.Status().Update(ctx, model)
+		if err := r.Status().Update(ctx, model); err != nil {
+			return ctrl.Result{}, err
+		}
 		logger.Info("cache ensure complete", "result", result)
+	} else if r.CacheManagerURL == "" {
+		logger.Info("cache-manager not configured, skipping cache step")
 	}
 
-	// Step 3: Patch target backend deployment
-	effectiveArgs := effectiveArgs(model)
-	patchData := map[string]any{
-		"spec": map[string]any{
-			"replicas": int64(1),
-			"template": map[string]any{
-				"metadata": map[string]any{
-					"annotations": map[string]string{
-						activeModelAnno: model.Spec.Model.Name,
-						switchedAtAnno:  time.Now().UTC().Format(time.RFC3339Nano),
-					},
-				},
-				"spec": map[string]any{
-					"containers": []map[string]any{
-						{
-							"name": backend.Spec.ContainerName,
-							"args": effectiveArgs,
-						},
-					},
-				},
-			},
-		},
-	}
-	patchBytes, err := json.Marshal(patchData)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("marshal patch: %w", err)
+	if err := checkCurrent(); err != nil {
+		return transitionCheckResult(err, logger)
 	}
 
-	var deployment appsv1.Deployment
-	if err := r.Get(ctx, types.NamespacedName{Name: backend.Spec.DeploymentRef.Name, Namespace: activeModel.Namespace}, &deployment); err != nil {
-		return ctrl.Result{}, fmt.Errorf("get deployment: %w", err)
-	}
-
-	if err := r.Patch(transitionCtx, &deployment, client.RawPatch(types.MergePatchType, patchBytes)); err != nil {
+	// Step 3: Patch only the selected container and preserve every sidecar.
+	if err := r.activateDeployment(transitionCtx, activeModel, model, backend); err != nil {
 		logger.Error(err, "failed to patch deployment")
-		activeModel.Status.Phase = cogitodevv1alpha1.ActiveModelPhaseFailed
-		setActiveCondition(&activeModel.Status, ModelActiveCondition, metav1.ConditionFalse, "PatchFailed", err.Error())
-		_ = r.Status().Update(ctx, activeModel)
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		return r.failTransition(ctx, activeModel, model.Spec.Model.Name, "PatchFailed", "patch_failed", err)
+	}
+
+	if err := checkCurrent(); err != nil {
+		return transitionCheckResult(err, logger)
 	}
 
 	// Step 4: Wait for rollout and health
-	if err := r.waitForRollout(transitionCtx, backend.Spec.DeploymentRef.Name, activeModel.Namespace); err != nil {
+	if err := r.waitForRollout(transitionCtx, backend.Spec.DeploymentRef.Name, activeModel.Namespace, checkCurrent); err != nil {
+		if errors.Is(err, errTransitionChanged) {
+			return transitionCheckResult(err, logger)
+		}
 		logger.Error(err, "timeout waiting for rollout")
-		return ctrl.Result{RequeueAfter: backendProbeWait}, nil
+		return r.failTransition(ctx, activeModel, model.Spec.Model.Name, "RolloutFailed", "rollout_failed", err)
+	}
+
+	if err := checkCurrent(); err != nil {
+		return transitionCheckResult(err, logger)
 	}
 
 	// Step 5: Health check
 	backendURL := fmt.Sprintf("http://%s:%d", backend.Spec.ServiceRef.Name, backend.Spec.Port)
-	if !r.healthCheck(transitionCtx, backendURL) {
-		logger.Info("backend not yet healthy, requeueing")
-		return ctrl.Result{RequeueAfter: backendProbeWait}, nil
+	if err := driver.CheckHealth(transitionCtx, r.httpClient(), backendURL); err != nil {
+		logger.Error(err, "backend health check failed")
+		return r.failTransition(ctx, activeModel, model.Spec.Model.Name, "HealthCheckFailed", "health_check_failed", err)
+	}
+
+	if err := checkCurrent(); err != nil {
+		return transitionCheckResult(err, logger)
 	}
 
 	// Step 6: Collect runtime metadata
-	runtimeMeta, err := r.collectRuntimeMetadata(transitionCtx, backendURL, model)
+	runtimeMeta, err := driver.CollectRuntimeMetadata(transitionCtx, r.httpClient(), backendURL, model)
 	if err != nil {
 		logger.Error(err, "failed to collect runtime metadata")
 		// Non-fatal, continue
+	}
+	if err := checkCurrent(); err != nil {
+		return transitionCheckResult(err, logger)
 	}
 
 	// Step 7: Update model status to Active
@@ -307,7 +378,10 @@ func (r *LLMActiveModelReconciler) executeTransition(ctx context.Context, active
 		model.Status.RuntimeMetadata = runtimeMeta
 	}
 	if err := r.Status().Update(ctx, model); err != nil {
-		logger.Error(err, "failed to update model status")
+		return ctrl.Result{}, fmt.Errorf("update target model status: %w", err)
+	}
+	if err := checkCurrent(); err != nil {
+		return transitionCheckResult(err, logger)
 	}
 
 	// Step 8: Deactivate previous model
@@ -316,8 +390,13 @@ func (r *LLMActiveModelReconciler) executeTransition(ctx context.Context, active
 		if prevModel != nil {
 			prevModel.Status.Active = false
 			prevModel.Status.Phase = cogitodevv1alpha1.ModelPhaseReady
-			_ = r.Status().Update(ctx, prevModel)
+			if err := r.Status().Update(ctx, prevModel); err != nil {
+				return ctrl.Result{}, fmt.Errorf("deactivate previous model: %w", err)
+			}
 		}
+	}
+	if err := checkCurrent(); err != nil {
+		return transitionCheckResult(err, logger)
 	}
 
 	// Step 9: Mark stable
@@ -333,10 +412,72 @@ func (r *LLMActiveModelReconciler) executeTransition(ctx context.Context, active
 		return ctrl.Result{}, err
 	}
 
+	// Record metrics
+	metrics.RecordTransitionDuration(transitionDuration, model.Spec.Model.Name)
+	metrics.RecordModelSwitch(activeModel.Status.TransitionFrom, model.Spec.Model.Name, string(model.Spec.Serving.Backend))
+
 	logger.Info("transition complete", "model", model.Spec.Model.Name, "duration", transitionDuration)
-	r.Recorder.Event(activeModel, corev1.EventTypeNormal, "TransitionComplete", fmt.Sprintf("Switched to model %s in %s", model.Spec.Model.Name, transitionDuration))
+	if r.Recorder != nil {
+		r.Recorder.Event(activeModel, corev1.EventTypeNormal, "TransitionComplete", fmt.Sprintf("Switched to model %s in %s", model.Spec.Model.Name, transitionDuration))
+	}
 
 	return ctrl.Result{}, nil
+}
+
+var errTransitionChanged = errors.New(errTransitionCancelled)
+
+func (r *LLMActiveModelReconciler) ensureTransitionCurrent(ctx context.Context, activeModel *cogitodevv1alpha1.LLMActiveModel, targetModel string, generation int64) error {
+	var current cogitodevv1alpha1.LLMActiveModel
+	key := types.NamespacedName{Name: activeModel.Name, Namespace: activeModel.Namespace}
+	if err := r.Get(ctx, key, &current); err != nil {
+		return err
+	}
+	if current.GetGeneration() != generation ||
+		current.Spec.ModelName != targetModel ||
+		current.Status.TransitionGeneration != generation {
+		return fmt.Errorf("%w: requested model or generation changed", errTransitionChanged)
+	}
+	return nil
+}
+
+func transitionCheckResult(err error, logger logr.Logger) (ctrl.Result, error) {
+	if errors.Is(err, errTransitionChanged) {
+		logger.Info("transition cancelled because the requested generation changed")
+		return ctrl.Result{Requeue: true}, nil
+	}
+	return ctrl.Result{}, err
+}
+
+func (r *LLMActiveModelReconciler) failTransition(ctx context.Context, activeModel *cogitodevv1alpha1.LLMActiveModel, modelName, reason, metricReason string, cause error) (ctrl.Result, error) {
+	activeModel.Status.Phase = cogitodevv1alpha1.ActiveModelPhaseFailed
+	setActiveCondition(&activeModel.Status, ModelActiveCondition, metav1.ConditionFalse, reason, cause.Error())
+	metrics.RecordTransitionFailure(modelName, metricReason)
+	if err := r.Status().Update(ctx, activeModel); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+}
+
+func (r *LLMActiveModelReconciler) activateDeployment(ctx context.Context, activeModel *cogitodevv1alpha1.LLMActiveModel, model *cogitodevv1alpha1.LLMModel, backend *cogitodevv1alpha1.LLMBackend) error {
+	var deployment appsv1.Deployment
+	if err := r.Get(ctx, types.NamespacedName{Name: backend.Spec.DeploymentRef.Name, Namespace: activeModel.Namespace}, &deployment); err != nil {
+		return fmt.Errorf("get deployment: %w", err)
+	}
+	base := deployment.DeepCopy()
+	one := int32(1)
+	deployment.Spec.Replicas = &one
+	if deployment.Spec.Template.Annotations == nil {
+		deployment.Spec.Template.Annotations = make(map[string]string)
+	}
+	deployment.Spec.Template.Annotations[activeModelAnno] = model.Spec.Model.Name
+	deployment.Spec.Template.Annotations[switchedAtAnno] = time.Now().UTC().Format(time.RFC3339Nano)
+	for i := range deployment.Spec.Template.Spec.Containers {
+		if deployment.Spec.Template.Spec.Containers[i].Name == backend.Spec.ContainerName {
+			deployment.Spec.Template.Spec.Containers[i].Args = effectiveArgs(model)
+			return r.Patch(ctx, &deployment, client.MergeFrom(base))
+		}
+	}
+	return fmt.Errorf("container %q not found in deployment %q", backend.Spec.ContainerName, deployment.Name)
 }
 
 func (r *LLMActiveModelReconciler) scaleDeployment(ctx context.Context, name, namespace string, replicas int32) error {
@@ -348,12 +489,15 @@ func (r *LLMActiveModelReconciler) scaleDeployment(ctx context.Context, name, na
 	return r.Patch(ctx, &deployment, client.RawPatch(types.MergePatchType, patch))
 }
 
-func (r *LLMActiveModelReconciler) waitForScaleDown(ctx context.Context, name, namespace string) error {
+func (r *LLMActiveModelReconciler) waitForScaleDown(ctx context.Context, name, namespace string, checkCurrent func() error) error {
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(backendProbeWait):
+		case <-time.After(r.probeInterval()):
+		}
+		if err := checkCurrent(); err != nil {
+			return err
 		}
 
 		var deployment appsv1.Deployment
@@ -366,12 +510,15 @@ func (r *LLMActiveModelReconciler) waitForScaleDown(ctx context.Context, name, n
 	}
 }
 
-func (r *LLMActiveModelReconciler) waitForRollout(ctx context.Context, name, namespace string) error {
+func (r *LLMActiveModelReconciler) waitForRollout(ctx context.Context, name, namespace string, checkCurrent func() error) error {
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(backendProbeWait):
+		case <-time.After(r.probeInterval()):
+		}
+		if err := checkCurrent(); err != nil {
+			return err
 		}
 
 		var deployment appsv1.Deployment
@@ -386,89 +533,18 @@ func (r *LLMActiveModelReconciler) waitForRollout(ctx context.Context, name, nam
 	}
 }
 
-func (r *LLMActiveModelReconciler) healthCheck(ctx context.Context, url string) bool {
-	healthURL := url + "/health"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
-	if err != nil {
-		return false
+func (r *LLMActiveModelReconciler) probeInterval() time.Duration {
+	if r.ProbeInterval > 0 {
+		return r.ProbeInterval
 	}
-	resp, err := r.HTTPClient.Do(req)
-	if err != nil {
-		return false
-	}
-	resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
+	return backendProbeWait
 }
 
-func (r *LLMActiveModelReconciler) collectRuntimeMetadata(ctx context.Context, url string, model *cogitodevv1alpha1.LLMModel) (*cogitodevv1alpha1.RuntimeMetadata, error) {
-	meta := &cogitodevv1alpha1.RuntimeMetadata{
-		ObservedAt:      metav1.Now(),
-		ContextLength:   model.Spec.Serving.MaxModelLen,
-		LaunchArguments: launchArguments(effectiveArgs(model)),
+func (r *LLMActiveModelReconciler) httpClient() *http.Client {
+	if r.HTTPClient != nil {
+		return r.HTTPClient
 	}
-
-	// Get served models from /v1/models
-	models, err := r.backendModels(ctx, url)
-	if err == nil {
-		meta.ServedModelIDs = models
-	}
-
-	// Get max-num-seqs from args
-	if seqs, ok := meta.LaunchArguments["--max-num-seqs"]; ok {
-		if n, err := strconv.Atoi(seqs); err == nil {
-			meta.MaxConcurrentReqs = n
-		}
-	}
-
-	// Get KV cache info from /metrics
-	metrics, err := r.backendText(ctx, url+"/metrics")
-	if err == nil {
-		meta.KVCache = parseCacheConfig(metrics)
-	}
-
-	return meta, nil
-}
-
-func (r *LLMActiveModelReconciler) backendText(ctx context.Context, url string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return "", err
-	}
-	resp, err := r.HTTPClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("backend returned %s", resp.Status)
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
-	if err != nil {
-		return "", err
-	}
-	return string(body), nil
-}
-
-func (r *LLMActiveModelReconciler) backendModels(ctx context.Context, url string) ([]string, error) {
-	body, err := r.backendText(ctx, url+"/v1/models")
-	if err != nil {
-		return nil, err
-	}
-	var response struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal([]byte(body), &response); err != nil {
-		return nil, err
-	}
-	var ids []string
-	for _, m := range response.Data {
-		if m.ID != "" {
-			ids = append(ids, m.ID)
-		}
-	}
-	return ids, nil
+	return &http.Client{Timeout: 10 * time.Second}
 }
 
 func (r *LLMActiveModelReconciler) SetupWithManager(mgr ctrl.Manager) error {
@@ -481,13 +557,46 @@ func (r *LLMActiveModelReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&cogitodevv1alpha1.LLMActiveModel{}).
-		Watches(&cogitodevv1alpha1.LLMModel{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []ctrl.Request {
-			return []ctrl.Request{{NamespacedName: client.ObjectKeyFromObject(obj)}}
-		})).
-		Watches(&cogitodevv1alpha1.LLMBackend{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []ctrl.Request {
-			return []ctrl.Request{{NamespacedName: client.ObjectKeyFromObject(obj)}}
-		})).
+		Watches(&cogitodevv1alpha1.LLMModel{}, handler.EnqueueRequestsFromMapFunc(
+			r.enqueueActiveModelForModel,
+		)).
+		Watches(&cogitodevv1alpha1.LLMBackend{}, handler.EnqueueRequestsFromMapFunc(
+			r.enqueueActiveModelForBackend,
+		)).
+		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		Complete(r)
+}
+
+// enqueueActiveModelForModel finds the singleton LLMActiveModel in the same
+// namespace as the changed LLMModel and enqueues it for reconciliation.
+func (r *LLMActiveModelReconciler) enqueueActiveModelForModel(ctx context.Context, obj client.Object) []ctrl.Request {
+	var list cogitodevv1alpha1.LLMActiveModelList
+	if err := r.List(ctx, &list, client.InNamespace(obj.GetNamespace())); err != nil {
+		return nil
+	}
+	var requests []ctrl.Request
+	for _, am := range list.Items {
+		requests = append(requests, ctrl.Request{
+			NamespacedName: client.ObjectKeyFromObject(&am),
+		})
+	}
+	return requests
+}
+
+// enqueueActiveModelForBackend finds the singleton LLMActiveModel in the same
+// namespace as the changed LLMBackend and enqueues it for reconciliation.
+func (r *LLMActiveModelReconciler) enqueueActiveModelForBackend(ctx context.Context, obj client.Object) []ctrl.Request {
+	var list cogitodevv1alpha1.LLMActiveModelList
+	if err := r.List(ctx, &list, client.InNamespace(obj.GetNamespace())); err != nil {
+		return nil
+	}
+	var requests []ctrl.Request
+	for _, am := range list.Items {
+		requests = append(requests, ctrl.Request{
+			NamespacedName: client.ObjectKeyFromObject(&am),
+		})
+	}
+	return requests
 }
 
 func setActiveCondition(status *cogitodevv1alpha1.LLMActiveModelStatus, conditionType string, statusVal metav1.ConditionStatus, reason, message string) {
@@ -510,98 +619,4 @@ func setActiveCondition(status *cogitodevv1alpha1.LLMActiveModelStatus, conditio
 		Message:            message,
 		LastTransitionTime: now,
 	})
-}
-
-func launchArguments(args []string) map[string]string {
-	values := map[string]string{}
-	for i := 0; i < len(args); i++ {
-		if !strings.HasPrefix(args[i], "--") {
-			continue
-		}
-		if i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
-			values[args[i]] = args[i+1]
-			i++
-		} else {
-			values[args[i]] = "true"
-		}
-	}
-	return values
-}
-
-func parseCacheConfig(metrics string) map[string]string {
-	scanner := bufio.NewScanner(strings.NewReader(metrics))
-	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "vllm:cache_config_info{") {
-			continue
-		}
-		start := strings.IndexByte(line, '{')
-		end := strings.LastIndex(line, "}")
-		if start < 0 || end <= start {
-			return nil
-		}
-		return parsePrometheusLabels(line[start+1 : end])
-	}
-	return nil
-}
-
-func parsePrometheusLabels(encoded string) map[string]string {
-	labels := map[string]string{}
-	for len(encoded) > 0 {
-		equals := strings.IndexByte(encoded, '=')
-		if equals < 1 || equals+1 >= len(encoded) || encoded[equals+1] != '"' {
-			return labels
-		}
-		key := encoded[:equals]
-		encoded = encoded[equals+1:]
-		end := 1
-		for end < len(encoded) {
-			if encoded[end] == '"' && encoded[end-1] != '\\' {
-				break
-			}
-			end++
-		}
-		if end >= len(encoded) {
-			return labels
-		}
-		value, err := strconv.Unquote(encoded[:end+1])
-		if err != nil {
-			return labels
-		}
-		labels[key] = value
-		encoded = strings.TrimPrefix(encoded[end+1:], ",")
-	}
-	return labels
-}
-
-func parseSize(s string) (int64, error) {
-	// Simple parser for sizes like "60Gi", "100Mi", "1G"
-	var unitMultiplier int64
-	switch {
-	case strings.HasSuffix(s, "Gi"):
-		unitMultiplier = 1024 * 1024 * 1024
-		s = strings.TrimSuffix(s, "Gi")
-	case strings.HasSuffix(s, "Mi"):
-		unitMultiplier = 1024 * 1024
-		s = strings.TrimSuffix(s, "Mi")
-	case strings.HasSuffix(s, "Ki"):
-		unitMultiplier = 1024
-		s = strings.TrimSuffix(s, "Ki")
-	case strings.HasSuffix(s, "G"):
-		unitMultiplier = 1000 * 1000 * 1000
-		s = strings.TrimSuffix(s, "G")
-	case strings.HasSuffix(s, "M"):
-		unitMultiplier = 1000 * 1000
-		s = strings.TrimSuffix(s, "M")
-	case strings.HasSuffix(s, "K"):
-		unitMultiplier = 1000
-		s = strings.TrimSuffix(s, "K")
-	default:
-		unitMultiplier = 1
-	}
-	n, err := strconv.ParseInt(s, 10, 64)
-	if err != nil {
-		return 0, err
-	}
-	return n * unitMultiplier, nil
 }

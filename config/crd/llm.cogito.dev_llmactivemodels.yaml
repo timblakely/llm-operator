@@ -31,7 +31,7 @@ spec:
       jsonPath: .status.backendType
       name: Backend
       type: string
-    name: cogitodevv1alpha1
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: LLMActiveModel is the Schema for the llmactivemodels API.
@@ -73,6 +73,7 @@ spec:
                   model.
                 enum:
                 - vllm
+                - sglang
                 - llama-cpp
                 type: string
               conditions:
@@ -153,14 +154,18 @@ spec:
               transitionFrom:
                 description: TransitionFrom is the previous model (if switching).
                 type: string
+              transitionGeneration:
+                description: |-
+                  TransitionGeneration identifies the spec generation currently being
+                  transitioned. A reconcile aborts when this token no longer matches.
+                format: int64
+                type: integer
               transitionStarted:
                 description: TransitionStarted is when the current transition began.
                 format: date-time
                 type: string
             required:
-            - backendType
             - modelName
-            - phase
             type: object
         type: object
     served: true

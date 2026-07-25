@@ -1,0 +1,45 @@
+apiVersion: llm.cogito.dev/v1alpha1
+kind: LLMBackend
+metadata:
+  name: sglang
+  namespace: llm
+spec:
+  type: sglang
+  deploymentRef:
+    name: llm-sglang
+  containerName: sglang
+  serviceRef:
+    name: llm-sglang
+  port: 30000
+  runtimeClassName: nvidia
+  gpuResources:
+    requests:
+      nvidia.com/gpu: "1"
+    limits:
+      nvidia.com/gpu: "1"
+---
+apiVersion: llm.cogito.dev/v1alpha1
+kind: LLMModel
+metadata:
+  name: qwen3-8b-sglang
+  namespace: llm
+spec:
+  model:
+    name: Qwen/Qwen3-8B
+    source: Qwen/Qwen3-8B
+  backendRef:
+    name: sglang
+  serving:
+    backend: sglang
+    displayName: "Qwen3 8B (SGLang)"
+    maxModelLen: 32768
+    toolCallParser: qwen3_coder
+    reasoningParser: qwen3
+    args:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "30000"
+      - --max-running-requests
+      - "16"
+      - --enable-metrics

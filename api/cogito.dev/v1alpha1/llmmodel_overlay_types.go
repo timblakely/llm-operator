@@ -17,8 +17,7 @@
 package cogitodevv1alpha1
 
 import (
-	"encoding/json"
-
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -35,9 +34,8 @@ type LLMModelOverlaySpec struct {
 	// RequestDefaults merges into client requests before forwarding to the backend.
 	// Keys not present in the client request are filled in. Client values always win.
 	// Must NOT contain a "model" key (the controller sets this to the base model).
-	// +kubebuilder:validation:XValidation:message="requestDefaults must be valid JSON",rule="self.matches(r\"\"\"^\\{.*\\}$\"\"\")"
-	// +kubebuilder:validation:XValidation:message="requestDefaults must not contain a 'model' key",rule="!(self.to_map().has_key('model'))"
-	RequestDefaults json.RawMessage `json:"requestDefaults"`
+	// +kubebuilder:pruning:PreserveUnknownFields
+	RequestDefaults apiextensionsv1.JSON `json:"requestDefaults"`
 }
 
 // LLMModelOverlayStatus defines the observed state of LLMModelOverlay.

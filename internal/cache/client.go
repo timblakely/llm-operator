@@ -34,9 +34,19 @@ type Client struct {
 
 // New creates a cache client for the given service URL.
 func New(baseURL string) *Client {
+	return NewWithHTTPClient(baseURL, &http.Client{})
+}
+
+// NewWithHTTPClient creates a cache client using the supplied HTTP client.
+// Sharing the transition client's timeout and transport makes cache requests
+// bounded and testable alongside runtime health requests.
+func NewWithHTTPClient(baseURL string, httpClient *http.Client) *Client {
+	if httpClient == nil {
+		httpClient = &http.Client{}
+	}
 	return &Client{
 		baseURL:    strings.TrimSuffix(baseURL, "/"),
-		httpClient: &http.Client{},
+		httpClient: httpClient,
 	}
 }
 
