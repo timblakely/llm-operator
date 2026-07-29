@@ -16,7 +16,7 @@ spec:
       serviceAccountName: llm-operator-controller-manager
       containers:
         - name: manager
-          image: ghcr.io/timblakely/llm-operator:latest
+          image: ghcr.io/timblakely/llm-operator:20260728-dev1
           env:
             - name: CACHE_MANAGER_URL
               value: http://cache-manager:8090

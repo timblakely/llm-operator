@@ -9,15 +9,18 @@ The configured Kubernetes context is `admin@nuglab`, with API endpoint
 `GET /livez` timed out. The host has a route through `192.168.10.1`, but the API
 endpoint did not accept a TCP connection.
 
-The configured manager image is also unavailable:
+The original preflight also found the then-configured mutable manager image tag
+unavailable:
 
 ```text
 ghcr.io/timblakely/llm-operator:latest: manifest unknown
 ```
 
-Because the API inventory could not be read and the manager image cannot be
-pulled, CRDs, RBAC, manager resources, and sample CRs were not applied. Backend
-Deployments, cache-manager, and the proxy were not contacted or mutated.
+The manifest now uses a newer development tag, but it has not yet been verified
+from the target cluster and is not pinned to an immutable digest. Because the
+API inventory could not be read and a reviewed image/chart artifact was not
+available, CRDs, RBAC, manager resources, and sample CRs were not applied.
+Backend Deployments, cache-manager, and the proxy were not contacted or mutated.
 
 There is also a validation-scope gap in the current controller behavior:
 observation mode records backend health and activation annotations, but runtime
@@ -47,10 +50,15 @@ passive metadata/status observation is designed, comparison must use
    kubectl get namespace llm
    ```
 
-2. Build and publish the operator image. Replace `:latest` in
-   `config/manager/manager.yaml` with the reviewed immutable image digest, then
-   rerun `make check` and `make observation-preflight`.
-3. Inventory the real resource names before applying sample CRs:
+2. Package and publish the operator image and OCI Helm chart with reviewed
+   immutable digests. The chart must default to `transitions.enabled=false`.
+   Run chart lint/template tests, then rerun `make check` and
+   `make observation-preflight`.
+3. Add an `OCIRepository` and `HelmRelease` in the Cogito GitOps repository.
+   The HelmRelease must reference the immutable chart artifact, use
+   `CreateReplace` for CRD install/upgrade, and set
+   `transitions.enabled=false`.
+4. Inventory the real resource names before applying workload CRs:
 
    ```bash
    kubectl -n llm get deployment,service,pod -o wide
@@ -58,23 +66,25 @@ passive metadata/status observation is designed, comparison must use
    kubectl get crd | grep llm.cogito.dev || true
    ```
 
-4. Review `deploymentRef`, `containerName`, `serviceRef`, port, model source,
+5. Review `deploymentRef`, `containerName`, `serviceRef`, port, model source,
    and revision in the sample CRs against that inventory. Do not apply a sample
    merely because its historical name resembles a live workload.
 
-Publishing an image or changing cluster connectivity requires external action;
-neither is performed by this repository validation.
+Publishing artifacts, changing cluster connectivity, and committing Cogito
+GitOps resources require external action; none is performed by this repository
+validation.
 
 ## Observation procedure
 
-Capture the transition-owned fields before applying operator resources:
+Capture the transition-owned fields before reconciling the operator chart:
 
 ```bash
 kubectl -n llm get deployment -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.replicas}{"\t"}{.spec.template.metadata.annotations.llm\.cogito\.dev/active-model}{"\t"}{range .spec.template.spec.containers[*]}{.name}{"="}{.args}{";"}{end}{"\n"}{end}' \
   > /tmp/llm-deployment-fields.before.txt
 kubectl -n llm get pod -o wide > /tmp/llm-pods.before.txt
 make observation-preflight
-kubectl apply -k config/default
+flux reconcile source oci llm-operator -n flux-system
+flux reconcile helmrelease llm-operator -n llm --with-source
 kubectl -n llm rollout status deployment/llm-operator-controller-manager
 ```
 
@@ -85,17 +95,15 @@ kubectl -n llm get deployment llm-operator-controller-manager \
   -o jsonpath='{.spec.template.spec.containers[0].args}'
 ```
 
-After reviewing references, apply only the backend and model CRs that describe
-existing workloads. Apply `LLMActiveModel` only after confirming transitions
-are disabled in the live manager:
+After reviewing references, commit only the backend and model CRs that describe
+existing workloads to Cogito GitOps and reconcile their owning Kustomization.
+Do not use these repository samples as direct imperative applies. Apply
+`LLMActiveModel` only after confirming transitions are disabled in the live
+manager:
 
 ```bash
-kubectl apply -f config/samples/llm_v1alpha1_llmbackend.yaml
-kubectl apply -f config/samples/llm_v1alpha1_llmmodel.yaml
-# Optional only when an SGLang workload already exists:
-kubectl apply -f config/samples/llm_v1alpha1_sglang.yaml
-kubectl apply -f config/samples/llm_v1alpha1_llmmodeloverlay.yaml
-kubectl apply -f config/samples/llm_v1alpha1_llmactivemodel.yaml
+# Replace <llm-models> with the reviewed Cogito Flux Kustomization name.
+flux reconcile kustomization <llm-models> -n flux-system --with-source
 ```
 
 Validate observed conditions and metadata:
@@ -143,15 +151,16 @@ operator-owned activation annotations must not change.
 
 ## Rollback
 
-The safest rollback leaves CRDs and observations intact and stops only the
-manager:
+The safest rollback leaves CRDs and observations intact and suspends or reverts
+the HelmRelease in Cogito GitOps:
 
 ```bash
-kubectl -n llm scale deployment/llm-operator-controller-manager --replicas=0
+flux suspend helmrelease llm-operator -n llm
 ```
 
-Alternatively, leave the manager running with `--enable-transitions=false`.
-The proxy remains the serving controller in both cases. Do not delete CRDs as
-an incident response step: that removes observation data and may interact with
-model finalizers. Do not change backend, cache-manager, or proxy workloads as
-part of operator rollback.
+Commit the equivalent suspension or removal in Cogito GitOps so Flux does not
+restore the release. Alternatively, leave the manager running with
+`--enable-transitions=false`. The proxy remains the serving controller in both
+cases. Do not delete CRDs as an incident response step: that removes observation
+data and may interact with model finalizers. Do not change backend,
+cache-manager, or proxy workloads as part of operator rollback.

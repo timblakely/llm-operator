@@ -6,6 +6,20 @@ Build a lightweight Kubernetes Operator (controller-runtime + Kubebuilder, Go) t
 
 ---
 
+## Deployment Packaging Decision
+
+For Cogito, deliver this operator as a versioned OCI Helm chart reconciled by
+Flux. The chart owns only operator infrastructure (CRDs, RBAC, manager,
+metrics Service, and PDB); the Cogito GitOps repository owns the
+`OCIRepository`, `HelmRelease`, environment values, and live model/backend CRs.
+The chart must default to observation mode with transitions disabled. Use Flux
+CRD `CreateReplace` policy for controlled CRD upgrades, and publish immutable
+chart and image artifacts before cluster validation.
+
+The current, ordered implementation plan is [remaining_work.md](remaining_work.md).
+
+---
+
 ## Current System Summary (from code review)
 
 | Component | Location | Role | Problems |

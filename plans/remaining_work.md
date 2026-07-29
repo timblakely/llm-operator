@@ -8,6 +8,19 @@ operator while retaining portable support for vLLM, SGLang, and llama.cpp.
 The manager must remain in observation mode until the transition test and
 cluster-validation gates below have passed.
 
+## Deployment Packaging Principle
+
+The operator is delivered to Cogito as a versioned OCI Helm chart reconciled by
+Flux. The chart owns only operator infrastructure: CRDs, ServiceAccount/RBAC,
+manager Deployment, metrics Service, and PDB. Cogito's GitOps repository owns
+the `OCIRepository`, `HelmRelease`, environment-specific values, and the
+`LLMBackend`/`LLMModel`/overlay CRs that describe real workloads.
+
+Do not package sample or live model CRs in the operator chart. They must be
+reviewed independently against the target cluster. Keep transitions disabled in
+the chart's default values and enable them only through a reviewed Git change
+after the controlled-cutover gate.
+
 ## Current Baseline
 
 - CRDs, controllers, backend drivers, parser fields, cache client, metrics,
@@ -73,21 +86,30 @@ runtime-specific behavior; every driver has contract tests.
 
 ## Milestone 3 — Observation-Mode Cluster Validation
 
-**Goal:** deploy safely beside the proxy and compare operator observations to
-the live system without changing it.
+**Goal:** deploy safely beside the proxy through Flux and compare operator
+observations to the live system without changing it.
 
-1. Deploy CRDs, RBAC, and the manager with `--enable-transitions=false`.
-2. Create `LLMBackend` and `LLMModel` CRs representing the existing vLLM and
+1. Create `charts/llm-operator/` with generated CRDs in `crds/` and templates
+   for the operator infrastructure only.
+2. Add chart lint/template tests and publish both the manager image and chart
+   to GHCR with reviewed immutable digests.
+3. Add an `OCIRepository` and `HelmRelease` to Cogito's GitOps repository. Use
+   `CreateReplace` CRD policy for install and upgrade, and set
+   `transitions.enabled=false` in the reviewed release values.
+4. Reconcile the Flux source and HelmRelease; verify the deployed manager image
+   digest and disabled transition argument.
+5. Create separately reviewed `LLMBackend` and `LLMModel` CRs representing the existing vLLM and
    llama.cpp deployments.
-3. Verify model, backend, and overlay conditions; expose the metrics Service to
+6. Verify model, backend, and overlay conditions; expose the metrics Service to
    Prometheus.
-4. Compare operator-derived runtime metadata and active-model status with the
+7. Compare operator-derived runtime metadata and active-model status with the
    proxy's current state.
-5. Record rollback steps: scale manager to zero or keep transitions disabled;
-   existing workloads remain proxy-controlled.
+8. Record a GitOps rollback: suspend or revert the HelmRelease while keeping
+   transitions disabled; existing workloads remain proxy-controlled.
 
 **Exit criteria:** a sustained observation period reports expected status with
-no Deployment, cache, or proxy mutations.
+no backend Deployment, cache, or proxy mutations. The chart and image are
+reconciled by Flux from immutable artifacts.
 
 ## Milestone 4 — Migration Tool and Proxy Dual Read
 
@@ -109,8 +131,8 @@ when backed by CRDs, with ConfigMap fallback still available.
 
 **Goal:** move transition ownership from the proxy to the operator.
 
-1. Extract cache-manager to its standalone Deployment and Service with the
-   required hot/cold cache volumes.
+1. Extend the operator chart with the optional standalone cache-manager
+   Deployment and Service, including the required hot/cold cache volumes.
 2. Add kind or equivalent integration tests with a mock runtime and
    cache-manager for end-to-end transitions.
 3. Disable proxy controller behavior while retaining reverse proxy, overlays,
@@ -129,9 +151,9 @@ tested rollback path; proxy no longer mutates backend Deployments.
 
 1. Add validating admission webhooks for duplicate canonical model names,
    backend availability, parser capabilities, and unsafe arguments.
-2. Configure Flux ownership/drift exceptions so Helm owns static workload
-   template fields and the operator owns replicas, activation annotations, and
-   runtime container arguments.
+2. Configure Flux ownership/drift exceptions so Helm owns static operator and
+   backend-template fields while the operator owns replicas, activation
+   annotations, and runtime container arguments.
 3. Add dashboards and alerts for transition duration/failures, backend health,
    cache failures, and leader-election availability.
 4. Write operational runbooks: add backend, add model, activate model, rollback,
@@ -146,5 +168,6 @@ documented operations and monitored production SLOs.
 
 `M0 → M1 → M2 → M3 → M4 → M5 → M6`
 
-M0–M2 are local development gates. M3 is safe to perform against the existing
-cluster. M4–M6 require coordination with the proxy and deployment repositories.
+M0–M2 are local development gates. M3 requires the operator chart and Cogito
+Flux resources before safe cluster observation. M4–M6 require coordination with
+the proxy and deployment repositories.

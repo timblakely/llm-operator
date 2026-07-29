@@ -1,5 +1,10 @@
 # Operator Expansion Plan
 
+> Historical Phase 1.5 gap analysis. Several items below are now complete;
+> consult [remaining_work.md](remaining_work.md) for current execution status
+> and [observation_validation.md](observation_validation.md) for the Flux-based
+> observation deployment procedure.
+
 ## Goal
 
 Expand the llm-operator from its current skeleton state to a **test-deployable** state (Phase 1.5) — enough to deploy the operator to the cluster, create CRDs, and verify that the controllers reconcile correctly against the existing vllm and laguna backends.
