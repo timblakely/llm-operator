@@ -53,8 +53,11 @@ spec:
             description: LLMModelOverlaySpec defines the desired state of LLMModelOverlay.
             properties:
               baseModel:
-                description: BaseModel references the underlying LLMModel by name.
-                pattern: ^[a-zA-Z0-9._-]+$
+                description: |-
+                  BaseModel references the underlying LLMModel by canonical model name.
+                  Canonical names may include a repository separator (for example,
+                  "org/model").
+                pattern: ^[a-zA-Z0-9._/-]+$
                 type: string
               displayName:
                 description: DisplayName is a human-readable label for the overlay.

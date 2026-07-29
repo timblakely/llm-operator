@@ -16,7 +16,9 @@ KUSTOMIZE := $(shell pwd)/bin/kustomize
 HELM := $(shell pwd)/bin/helm
 CHART := charts/llm-operator
 CHART_TEST_VALUES := $(CHART)/ci/test-values.yaml
-CHART_VERSION := 0.1.0
+# Derive the OCI package filename from Chart.yaml so a chart version bump cannot
+# accidentally push a stale package from dist/.
+CHART_VERSION ?= $(shell sed -n 's/^version: //p' $(CHART)/Chart.yaml)
 CHART_OCI_REGISTRY ?= oci://ghcr.io/timblakely/charts
 
 .PHONY: all

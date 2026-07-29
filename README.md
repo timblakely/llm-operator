@@ -11,7 +11,7 @@ The target architecture replaces the monolithic proxy controller with CRDs, a le
 | ✅ Complete | Milestone 0 — render and API validation | Generated CRDs/RBAC, schema validation, reproducible rendering, and `make check` are in place. |
 | ✅ Complete | Milestone 1 — transition test gate | Fake-client and envtest coverage covers transition safety, cancellation, singleton ownership, and failure paths. |
 | ✅ Complete | Milestone 2 — backend drivers | vLLM, SGLang, and llama.cpp drivers own runtime arguments, health, discovery, metadata, and cache requests. |
-| 🟡 In progress / blocked | Milestone 3 — Flux observation-mode validation | The digest-pinned Helm chart and Cogito Flux resources are implemented. Publishing immutable OCI artifacts and target-cluster validation remain. No cluster resource has been changed. |
+| 🟡 In progress | Milestone 3 — Flux observation-mode validation | The immutable chart and manager image are published and reconciled by Flux in Cogito. The manager is healthy with two ready replicas and transitions disabled; workload CR observation has not started. |
 | ⬜ TODO | Milestone 4 — migration and proxy dual read | Build ConfigMap-to-CRD conversion and add CRD reading with ConfigMap fallback to `vllm-proxy`. |
 | ⬜ TODO | Milestone 5 — controlled cutover | Extract cache-manager, add end-to-end tests, canary operator-owned transitions, and rollback validation. |
 | ⬜ TODO | Milestone 6 — production hardening | Admission webhooks, Flux ownership, dashboards/alerts, runbooks, and ConfigMap retirement. |
@@ -48,13 +48,13 @@ The manager defaults to `--enable-transitions=false`, including when run locally
 
 ### Observation-mode deployment
 
-Do not treat this as an unconditional quick start. Cogito deployment is a Flux-managed Helm release, not a direct `kubectl apply`. Before deployment, restore cluster access, publish reviewed immutable image and chart digests, and verify every workload CR reference against the live inventory.
+Do not treat this as an unconditional quick start. Cogito deployment is a Flux-managed Helm release, not a direct `kubectl apply`. The operator infrastructure is already deployed there in observation mode. Before adding any workload CR, verify its reference against the live inventory and capture an observation baseline.
 
 ```bash
 make observation-preflight
 ```
 
-Cogito reconciles chart version `0.1.0` from `oci://ghcr.io/timblakely/charts/llm-operator` through `OCIRepository` and `HelmRelease`, with `transitions.enabled=false`. The manager image must be supplied by immutable digest. Follow the complete [observation procedure and rollback steps](plans/observation_validation.md). `make samples-apply` is intentionally not part of the default procedure because the samples must be reviewed for the target cluster first.
+Cogito reconciles chart version `0.1.0` from `oci://ghcr.io/timblakely/charts/llm-operator` through `OCIRepository` and `HelmRelease`, with `transitions.enabled=false`. The live release is pinned to chart digest `sha256:ca9a4c…b4f5` and manager image digest `sha256:3ff7d49a…6996`; it has two ready, leader-elected replicas. Follow the complete [observation procedure and rollback steps](plans/observation_validation.md). `make samples-apply` is intentionally not part of the default procedure because the samples must be reviewed for the target cluster first.
 
 ### Docker
 
@@ -125,7 +125,7 @@ The operator exposes Prometheus metrics on `:8081`:
 
 ### Deployment
 
-The [Helm chart](charts/llm-operator/README.md) packages generated CRDs, RBAC, the manager Deployment, metrics Service, and PodDisruptionBudget. It renders two manager replicas by default with leader election, health probes, hardened security contexts, and transitions disabled. The manager image is required by immutable digest. Cogito consumes the versioned OCI chart through Flux; it has not yet been validated against the target cluster.
+The [Helm chart](charts/llm-operator/README.md) packages generated CRDs, RBAC, the manager Deployment, metrics Service, and PodDisruptionBudget. It renders two manager replicas by default with leader election, health probes, hardened security contexts, and transitions disabled. The manager image is required by immutable digest. Cogito consumes the versioned OCI chart through Flux; on 2026-07-28 the `OCIRepository` and `HelmRelease` were Ready, the Deployment was 2/2 available, and both Pods used the pinned manager digest with transitions disabled. No workload CRs have yet been applied.
 
 Model transitions are disabled by default so the operator can safely observe an
 existing proxy-managed installation. Enable them only after migration by passing
@@ -139,8 +139,9 @@ existing proxy-managed installation. Enable them only after migration by passing
 - [x] Lock the rendered manager in observation mode with `make observation-preflight`.
 - [x] Create and test an OCI Helm chart for operator infrastructure only: CRDs, RBAC, manager, metrics Service, and PDB.
 - [x] Create Cogito `OCIRepository` and `HelmRelease` resources with `transitions.enabled=false` and CRD `CreateReplace` policy.
-- [ ] Publish reviewed immutable image and chart artifacts.
-- [ ] Restore Kubernetes API connectivity, reconcile through Flux, and compare `LLMBackend` status/annotations to the proxy state over an observation window.
+- [x] Publish reviewed immutable image and chart artifacts, pin their digests in Cogito, and reconcile through Flux.
+- [x] Verify the live manager is healthy: Flux sources Ready, two replicas available, leader election active, and transitions disabled.
+- [ ] Create reviewed workload CRs in Cogito and compare `LLMBackend` status/annotations to the proxy state over an observation window.
 
 ### TODO — ConfigMap migration and proxy dual read
 

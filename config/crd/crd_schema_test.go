@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
 
 	apiextensions "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
@@ -78,6 +79,17 @@ func TestModelSchemaExposesStructuredParsers(t *testing.T) {
 		if schema.Type != "string" {
 			t.Fatalf("spec.serving.%s has type %q, want string", field, schema.Type)
 		}
+	}
+}
+
+func TestOverlayBaseModelAcceptsCanonicalModelNames(t *testing.T) {
+	schema := schemaAt(t, readCRD(t, "llm.cogito.dev_llmmodeloverlays.yaml"), "spec", "baseModel")
+	pattern, err := regexp.Compile(schema.Pattern)
+	if err != nil {
+		t.Fatalf("compile baseModel pattern %q: %v", schema.Pattern, err)
+	}
+	if !pattern.MatchString("google/gemma-4-31B-it-qat-w4a16-ct") {
+		t.Fatalf("baseModel pattern %q rejects a canonical model name", schema.Pattern)
 	}
 }
 

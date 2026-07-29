@@ -27,6 +27,12 @@ after the controlled-cutover gate.
   RBAC, and manager deployment manifests exist.
 - The `charts/llm-operator` OCI chart packages only operator infrastructure,
   requires a digest-pinned manager image, and defaults transitions to disabled.
+- Cogito has reconciled chart `0.1.0` at digest
+  `sha256:ca9a4c438302625f10bde4fa0c9df24f0eb8dcd021e4047fd1ea1644fd13b4f5`
+  and manager image digest
+  `sha256:3ff7d49a889437e17defddd23e36b4acd92ef092f4d5171c0a30f1268e806996`.
+  The `OCIRepository` and `HelmRelease` are Ready and the manager Deployment
+  is 2/2 available with transitions disabled.
 - vLLM, SGLang, and llama.cpp have runtime-specific launch-argument drivers.
 - `--enable-transitions=false` is the deployment default.
 - Unit tests cover driver behavior, disabled-transition safety, and
@@ -97,10 +103,14 @@ observations to the live system without changing it.
    `OCIRepository` and `HelmRelease` resources. The release uses
    `CreateReplace` CRD policy for install and upgrade and sets
    `transitions.enabled=false`.
-3. **TODO:** publish both the manager image and chart to GHCR with reviewed
-   immutable digests, then commit the Cogito GitOps resources.
-4. **TODO:** reconcile the Flux source and HelmRelease; verify the deployed manager image
-   digest and disabled transition argument.
+3. **Complete:** publish the manager image and chart to GHCR with reviewed
+   immutable digests and commit the Cogito GitOps resources. Chart digest:
+   `sha256:ca9a4c438302625f10bde4fa0c9df24f0eb8dcd021e4047fd1ea1644fd13b4f5`;
+   image digest:
+   `sha256:3ff7d49a889437e17defddd23e36b4acd92ef092f4d5171c0a30f1268e806996`.
+4. **Complete:** reconcile the Flux source and HelmRelease. On 2026-07-28,
+   both were Ready, the manager was 2/2 available, and its exact runtime
+   argument included `--enable-transitions=false`.
 5. **TODO:** create separately reviewed `LLMBackend` and `LLMModel` CRs representing the existing vLLM and
    llama.cpp deployments.
 6. **TODO:** verify model, backend, and overlay conditions; expose the metrics Service to

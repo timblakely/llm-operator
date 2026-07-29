@@ -27,8 +27,10 @@ type LLMModelOverlaySpec struct {
 	// DisplayName is a human-readable label for the overlay.
 	DisplayName string `json:"displayName"`
 
-	// BaseModel references the underlying LLMModel by name.
-	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9._-]+$`
+	// BaseModel references the underlying LLMModel by canonical model name.
+	// Canonical names may include a repository separator (for example,
+	// "org/model").
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9._/-]+$`
 	BaseModel string `json:"baseModel"`
 
 	// RequestDefaults merges into client requests before forwarding to the backend.

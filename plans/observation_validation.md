@@ -2,25 +2,25 @@
 
 ## Status
 
-**Blocked on 2026-07-27 before deployment. No cluster resources were changed.**
+**Infrastructure deployment complete on 2026-07-28; workload observation is pending.**
 
-The configured Kubernetes context is `admin@nuglab`, with API endpoint
-`https://10.0.1.69:6443`. Both an authenticated `kubectl get` and an unauthenticated
-`GET /livez` timed out. The host has a route through `192.168.10.1`, but the API
-endpoint did not accept a TCP connection.
+Cogito context `main` (API `https://k8s.internal:6443`) now has a healthy,
+Flux-managed operator release in namespace `llm`:
 
-The original preflight also found the then-configured mutable manager image tag
-unavailable:
+- `OCIRepository/llm-operator` is Ready at chart digest
+  `sha256:ca9a4c438302625f10bde4fa0c9df24f0eb8dcd021e4047fd1ea1644fd13b4f5`.
+- `HelmRelease/llm-operator` is Ready/Released at chart `0.1.0` (release v2).
+- `Deployment/llm-operator` is 2/2 ready and available; both Pods are Running
+  with zero restarts and use manager image digest
+  `sha256:3ff7d49a889437e17defddd23e36b4acd92ef092f4d5171c0a30f1268e806996`.
+- The live manager arguments include exactly `--enable-transitions=false` and
+  leader election is active. All four CRDs are Established and controller logs
+  have no current warnings or errors.
 
-```text
-ghcr.io/timblakely/llm-operator:latest: manifest unknown
-```
-
-The manifest now uses a newer development tag, but it has not yet been verified
-from the target cluster and is not pinned to an immutable digest. Because the
-API inventory could not be read and a reviewed image/chart artifact was not
-available, CRDs, RBAC, manager resources, and sample CRs were not applied.
-Backend Deployments, cache-manager, and the proxy were not contacted or mutated.
+Initial OCI authorization and image-pull failures occurred during first
+installation, but Flux recovered and the current release is healthy. No
+`LLMBackend`, `LLMModel`, `LLMModelOverlay`, or `LLMActiveModel` instances exist
+yet, so no workload or proxy observation has been performed.
 
 There is also a validation-scope gap in the current controller behavior:
 observation mode records backend health and activation annotations, but runtime
@@ -44,24 +44,17 @@ passive metadata/status observation is designed, comparison must use
   `oci://ghcr.io/timblakely/charts/llm-operator`.
 - Transition mutation remains opt-in in manager code and manifests.
 
-## Preconditions to resume
+## Remaining preconditions for workload observation
 
-1. Restore network access to `10.0.1.69:6443` and confirm read access:
+1. Confirm the already-deployed release remains healthy before each workload
+   change:
 
    ```bash
-   kubectl config current-context
-   kubectl get --raw=/livez
-   kubectl get namespace llm
+   kubectl -n llm get ocirepository/llm-operator helmrelease/llm-operator
+   kubectl -n llm rollout status deployment/llm-operator
    ```
 
-2. Publish the operator image with a reviewed immutable digest, then package
-   and publish the already validated chart with `make chart-push`. Run
-   `make chart-check`, `make check`, and `make observation-preflight` first.
-3. Add an `OCIRepository` and `HelmRelease` in the Cogito GitOps repository.
-   The HelmRelease must reference the immutable chart artifact, use
-   `CreateReplace` for CRD install/upgrade, and set
-   `transitions.enabled=false`.
-4. Inventory the real resource names before applying workload CRs:
+2. Inventory the real resource names before committing workload CRs:
 
    ```bash
    kubectl -n llm get deployment,service,pod -o wide
@@ -69,24 +62,25 @@ passive metadata/status observation is designed, comparison must use
    kubectl get crd | grep llm.cogito.dev || true
    ```
 
-5. Review `deploymentRef`, `containerName`, `serviceRef`, port, model source,
+3. Review `deploymentRef`, `containerName`, `serviceRef`, port, model source,
    and revision in the sample CRs against that inventory. Do not apply a sample
    merely because its historical name resembles a live workload.
 
-Publishing artifacts, changing cluster connectivity, and committing Cogito
-GitOps resources require external action; none is performed by this repository
-validation.
+4. Add only the reviewed workload CRs to Cogito's reserved
+   `kubernetes/apps/llm/llm-operator/resources/` directory and include them in
+   its Kustomization. Do not add repository samples wholesale.
 
 ## Observation procedure
 
-Capture the transition-owned fields before reconciling the operator chart:
+The operator chart is already reconciled. Before adding the first workload CR,
+capture a fresh baseline for the observation window:
 
 ```bash
 kubectl -n llm get deployment -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.replicas}{"\t"}{.spec.template.metadata.annotations.llm\.cogito\.dev/active-model}{"\t"}{range .spec.template.spec.containers[*]}{.name}{"="}{.args}{";"}{end}{"\n"}{end}' \
   > /tmp/llm-deployment-fields.before.txt
 kubectl -n llm get pod -o wide > /tmp/llm-pods.before.txt
 make observation-preflight
-flux reconcile source oci llm-operator -n flux-system
+flux reconcile source oci llm-operator -n llm
 flux reconcile helmrelease llm-operator -n llm --with-source
 kubectl -n llm rollout status deployment/llm-operator
 ```
