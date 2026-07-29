@@ -1,0 +1,10 @@
+llm-operator {{ .Chart.Version }} is configured in namespace {{ .Release.Namespace }}.
+
+Manager image: {{ include "llm-operator.image" . }}
+Transitions enabled: {{ .Values.transitions.enabled }}
+
+{{- if .Values.transitions.enabled }}
+WARNING: transitions are enabled. The operator may mutate referenced backend Deployments.
+{{- else }}
+The operator is in observation mode and will not perform model transitions.
+{{- end }}

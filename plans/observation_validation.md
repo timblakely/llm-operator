@@ -38,6 +38,10 @@ passive metadata/status observation is designed, comparison must use
   argument, contains it more than once, or enables transitions.
 - The rendered Deployment, RBAC, CRDs, metrics Service, and PDB are internally
   consistent through `make check`.
+- `make chart-check` proves the Helm chart CRDs match the generated manifests,
+  the manager image is digest-pinned, and transitions render disabled by
+  default. The chart is version `0.1.0` at the intended OCI artifact URL
+  `oci://ghcr.io/timblakely/charts/llm-operator`.
 - Transition mutation remains opt-in in manager code and manifests.
 
 ## Preconditions to resume
@@ -50,10 +54,9 @@ passive metadata/status observation is designed, comparison must use
    kubectl get namespace llm
    ```
 
-2. Package and publish the operator image and OCI Helm chart with reviewed
-   immutable digests. The chart must default to `transitions.enabled=false`.
-   Run chart lint/template tests, then rerun `make check` and
-   `make observation-preflight`.
+2. Publish the operator image with a reviewed immutable digest, then package
+   and publish the already validated chart with `make chart-push`. Run
+   `make chart-check`, `make check`, and `make observation-preflight` first.
 3. Add an `OCIRepository` and `HelmRelease` in the Cogito GitOps repository.
    The HelmRelease must reference the immutable chart artifact, use
    `CreateReplace` for CRD install/upgrade, and set
@@ -85,13 +88,13 @@ kubectl -n llm get pod -o wide > /tmp/llm-pods.before.txt
 make observation-preflight
 flux reconcile source oci llm-operator -n flux-system
 flux reconcile helmrelease llm-operator -n llm --with-source
-kubectl -n llm rollout status deployment/llm-operator-controller-manager
+kubectl -n llm rollout status deployment/llm-operator
 ```
 
 Immediately verify the live Deployment retained the safety flag:
 
 ```bash
-kubectl -n llm get deployment llm-operator-controller-manager \
+kubectl -n llm get deployment llm-operator \
   -o jsonpath='{.spec.template.spec.containers[0].args}'
 ```
 
@@ -111,7 +114,7 @@ Validate observed conditions and metadata:
 ```bash
 kubectl -n llm get llmbackend,llmmodel,llmmodeloverlay,llmactivemodel -o wide
 kubectl -n llm get llmbackend,llmmodel,llmmodeloverlay,llmactivemodel -o yaml
-kubectl -n llm logs deployment/llm-operator-controller-manager --since=1h
+kubectl -n llm logs deployment/llm-operator --since=1h
 ```
 
 Expected observation-mode behavior:
@@ -127,7 +130,7 @@ Expected observation-mode behavior:
 Check operator metrics locally:
 
 ```bash
-kubectl -n llm port-forward service/llm-operator-controller-manager-metrics 18081:8081
+kubectl -n llm port-forward service/llm-operator-metrics 18081:8081
 curl --fail http://127.0.0.1:18081/metrics
 ```
 

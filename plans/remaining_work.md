@@ -25,6 +25,8 @@ after the controlled-cutover gate.
 
 - CRDs, controllers, backend drivers, parser fields, cache client, metrics,
   RBAC, and manager deployment manifests exist.
+- The `charts/llm-operator` OCI chart packages only operator infrastructure,
+  requires a digest-pinned manager image, and defaults transitions to disabled.
 - vLLM, SGLang, and llama.cpp have runtime-specific launch-argument drivers.
 - `--enable-transitions=false` is the deployment default.
 - Unit tests cover driver behavior, disabled-transition safety, and
@@ -89,22 +91,23 @@ runtime-specific behavior; every driver has contract tests.
 **Goal:** deploy safely beside the proxy through Flux and compare operator
 observations to the live system without changing it.
 
-1. Create `charts/llm-operator/` with generated CRDs in `crds/` and templates
-   for the operator infrastructure only.
-2. Add chart lint/template tests and publish both the manager image and chart
-   to GHCR with reviewed immutable digests.
-3. Add an `OCIRepository` and `HelmRelease` to Cogito's GitOps repository. Use
-   `CreateReplace` CRD policy for install and upgrade, and set
-   `transitions.enabled=false` in the reviewed release values.
-4. Reconcile the Flux source and HelmRelease; verify the deployed manager image
+1. **Complete:** create `charts/llm-operator/` with generated CRDs in `crds/`
+   and templates for the operator infrastructure only.
+2. **Complete locally:** add chart lint/template/package tests and Cogito
+   `OCIRepository` and `HelmRelease` resources. The release uses
+   `CreateReplace` CRD policy for install and upgrade and sets
+   `transitions.enabled=false`.
+3. **TODO:** publish both the manager image and chart to GHCR with reviewed
+   immutable digests, then commit the Cogito GitOps resources.
+4. **TODO:** reconcile the Flux source and HelmRelease; verify the deployed manager image
    digest and disabled transition argument.
-5. Create separately reviewed `LLMBackend` and `LLMModel` CRs representing the existing vLLM and
+5. **TODO:** create separately reviewed `LLMBackend` and `LLMModel` CRs representing the existing vLLM and
    llama.cpp deployments.
-6. Verify model, backend, and overlay conditions; expose the metrics Service to
+6. **TODO:** verify model, backend, and overlay conditions; expose the metrics Service to
    Prometheus.
-7. Compare operator-derived runtime metadata and active-model status with the
+7. **TODO:** compare operator-derived runtime metadata and active-model status with the
    proxy's current state.
-8. Record a GitOps rollback: suspend or revert the HelmRelease while keeping
+8. **TODO:** record a GitOps rollback: suspend or revert the HelmRelease while keeping
    transitions disabled; existing workloads remain proxy-controlled.
 
 **Exit criteria:** a sustained observation period reports expected status with

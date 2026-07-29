@@ -1,0 +1,94 @@
+# The manager image is deliberately digest-only. Set image.digest to a reviewed
+# sha256 digest when rendering or installing the chart.
+image:
+  repository: ghcr.io/timblakely/llm-operator
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+replicaCount: 2
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+  automountServiceAccountToken: true
+
+rbac:
+  create: true
+
+leaderElection:
+  enabled: true
+
+# Keep this false throughout observation mode. Enabling it authorizes the
+# LLMActiveModel controller to mutate referenced backend Deployments.
+transitions:
+  enabled: false
+
+metrics:
+  bindAddress: ":8081"
+  port: 8081
+  service:
+    enabled: true
+    type: ClusterIP
+    port: 8081
+    annotations: {}
+    labels: {}
+
+health:
+  bindAddress: ":8082"
+  port: 8082
+  livenessProbe:
+    initialDelaySeconds: 15
+    periodSeconds: 20
+    timeoutSeconds: 1
+    failureThreshold: 3
+  readinessProbe:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 1
+    failureThreshold: 3
+
+# Leave empty until the standalone cache-manager has been deployed. The
+# CACHE_MANAGER_URL environment variable is omitted when this is empty.
+cacheManager:
+  url: ""
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65532
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+priorityClassName: ""
+terminationGracePeriodSeconds: 10

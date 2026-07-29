@@ -11,7 +11,7 @@ The target architecture replaces the monolithic proxy controller with CRDs, a le
 | ✅ Complete | Milestone 0 — render and API validation | Generated CRDs/RBAC, schema validation, reproducible rendering, and `make check` are in place. |
 | ✅ Complete | Milestone 1 — transition test gate | Fake-client and envtest coverage covers transition safety, cancellation, singleton ownership, and failure paths. |
 | ✅ Complete | Milestone 2 — backend drivers | vLLM, SGLang, and llama.cpp drivers own runtime arguments, health, discovery, metadata, and cache requests. |
-| 🟡 In progress / blocked | Milestone 3 — Flux observation-mode validation | Local safety checks pass, but the Helm chart, published OCI artifacts, and reachable cluster API are still required. No cluster resource has been changed. |
+| 🟡 In progress / blocked | Milestone 3 — Flux observation-mode validation | The digest-pinned Helm chart and Cogito Flux resources are implemented. Publishing immutable OCI artifacts and target-cluster validation remain. No cluster resource has been changed. |
 | ⬜ TODO | Milestone 4 — migration and proxy dual read | Build ConfigMap-to-CRD conversion and add CRD reading with ConfigMap fallback to `vllm-proxy`. |
 | ⬜ TODO | Milestone 5 — controlled cutover | Extract cache-manager, add end-to-end tests, canary operator-owned transitions, and rollback validation. |
 | ⬜ TODO | Milestone 6 — production hardening | Admission webhooks, Flux ownership, dashboards/alerts, runbooks, and ConfigMap retirement. |
@@ -54,7 +54,7 @@ Do not treat this as an unconditional quick start. Cogito deployment is a Flux-m
 make observation-preflight
 ```
 
-The Helm chart and Flux resources are the next implementation task. Once available, Cogito will reconcile an OCI chart through `OCIRepository` and `HelmRelease`, with `transitions.enabled=false`. Follow the complete [observation procedure and rollback steps](plans/observation_validation.md). `make samples-apply` is intentionally not part of the default procedure because the samples must be reviewed for the target cluster first.
+Cogito reconciles chart version `0.1.0` from `oci://ghcr.io/timblakely/charts/llm-operator` through `OCIRepository` and `HelmRelease`, with `transitions.enabled=false`. The manager image must be supplied by immutable digest. Follow the complete [observation procedure and rollback steps](plans/observation_validation.md). `make samples-apply` is intentionally not part of the default procedure because the samples must be reviewed for the target cluster first.
 
 ### Docker
 
@@ -62,6 +62,9 @@ The Helm chart and Flux resources are the next implementation task. Once availab
 make docker-build
 make docker-push
 ```
+
+For a releasable, digest-pinned manager image and matching OCI chart, follow
+[Releasing the Manager Image and Helm Chart](docs/releasing.md).
 
 ## Architecture
 
@@ -122,7 +125,7 @@ The operator exposes Prometheus metrics on `:8081`:
 
 ### Deployment
 
-The current Kustomize manifests are the source material for the planned Helm chart. That chart will render two manager replicas, leader election, a PodDisruptionBudget with one available replica, health probes, RBAC, CRDs, and a metrics Service. Cogito will consume the versioned OCI chart through Flux; it has not yet been validated against the target cluster.
+The [Helm chart](charts/llm-operator/README.md) packages generated CRDs, RBAC, the manager Deployment, metrics Service, and PodDisruptionBudget. It renders two manager replicas by default with leader election, health probes, hardened security contexts, and transitions disabled. The manager image is required by immutable digest. Cogito consumes the versioned OCI chart through Flux; it has not yet been validated against the target cluster.
 
 Model transitions are disabled by default so the operator can safely observe an
 existing proxy-managed installation. Enable them only after migration by passing
@@ -134,9 +137,9 @@ existing proxy-managed installation. Enable them only after migration by passing
 
 - [x] Render and test all operator manifests locally.
 - [x] Lock the rendered manager in observation mode with `make observation-preflight`.
-- [ ] Create and test an OCI Helm chart for operator infrastructure only: CRDs, RBAC, manager, metrics Service, and PDB.
+- [x] Create and test an OCI Helm chart for operator infrastructure only: CRDs, RBAC, manager, metrics Service, and PDB.
+- [x] Create Cogito `OCIRepository` and `HelmRelease` resources with `transitions.enabled=false` and CRD `CreateReplace` policy.
 - [ ] Publish reviewed immutable image and chart artifacts.
-- [ ] Add Cogito `OCIRepository` and `HelmRelease` resources with `transitions.enabled=false` and CRD `CreateReplace` policy.
 - [ ] Restore Kubernetes API connectivity, reconcile through Flux, and compare `LLMBackend` status/annotations to the proxy state over an observation window.
 
 ### TODO — ConfigMap migration and proxy dual read
@@ -174,7 +177,9 @@ llm-operator/
 ├── config/rbac/                     # ServiceAccount, ClusterRole, RoleBinding
 ├── config/manager/                  # Deployment, metrics Service, PDB
 ├── config/samples/                  # Reviewable sample CR instances
+├── charts/llm-operator/             # Digest-pinned OCI Helm chart
 ├── docs/adding-backend.md            # Compiled-in backend extension guide
+├── docs/releasing.md                 # Manager image and chart promotion guide
 ├── plans/                            # Current plan, validation record, historical plan
 ├── hack/                             # Generation and observation preflight scripts
 ├── Dockerfile

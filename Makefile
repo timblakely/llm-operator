@@ -6,11 +6,18 @@ CONTROLLER_GEN_VERSION := v0.18.0
 SETUP_ENVTEST_VERSION := v0.24.1
 ENVTEST_K8S_VERSION := 1.35.0
 KUSTOMIZE_VERSION := v5.7.1
+HELM_VERSION := v3.19.0
+HELM_KUBE_VERSION := 1.35.0
 
 # Tools
 CONTROLLER_GEN := $(shell pwd)/bin/controller-gen
 ENVTEST := $(shell pwd)/bin/setup-envtest
 KUSTOMIZE := $(shell pwd)/bin/kustomize
+HELM := $(shell pwd)/bin/helm
+CHART := charts/llm-operator
+CHART_TEST_VALUES := $(CHART)/ci/test-values.yaml
+CHART_VERSION := 0.1.0
+CHART_OCI_REGISTRY ?= oci://ghcr.io/timblakely/charts
 
 .PHONY: all
 all: build
@@ -82,7 +89,34 @@ verify-generated: $(CONTROLLER_GEN) ## Fail if generated CRDs, RBAC, or deepcopy
 	@CONTROLLER_GEN=$(CONTROLLER_GEN) ./hack/verify-generated.sh
 
 .PHONY: check
-check: fmt-check vet unit-test envtest-test manifest-validate observation-preflight verify-generated ## Run all local and CI validation gates.
+check: fmt-check vet unit-test envtest-test manifest-validate observation-preflight verify-generated chart-check ## Run all local and CI validation gates.
+
+.PHONY: chart-crds-sync
+chart-crds-sync: manifests ## Copy generated CRDs into the Helm chart.
+	@for crd in config/crd/llm.cogito.dev_*.yaml; do \
+		install -m 0644 "$$crd" "$(CHART)/crds/$$(basename "$$crd")"; \
+	done
+
+.PHONY: chart-lint
+chart-lint: $(HELM) ## Lint the Helm chart with a non-deployable test image digest.
+	$(HELM) lint $(CHART) --kube-version $(HELM_KUBE_VERSION) -f $(CHART_TEST_VALUES)
+
+.PHONY: chart-template
+chart-template: $(HELM) ## Render the Helm chart, including CRDs, to stdout.
+	@$(HELM) template llm-operator $(CHART) --namespace llm --kube-version $(HELM_KUBE_VERSION) --include-crds -f $(CHART_TEST_VALUES)
+
+.PHONY: chart-check
+chart-check: $(HELM) ## Validate Helm schema, rendering, CRD sync, digest pinning, and observation defaults.
+	@HELM=$(HELM) HELM_KUBE_VERSION=$(HELM_KUBE_VERSION) ./hack/chart-check.sh
+
+.PHONY: chart-package
+chart-package: chart-check ## Package the validated Helm chart into dist/.
+	@mkdir -p dist
+	$(HELM) package $(CHART) --destination dist
+
+.PHONY: chart-push
+chart-push: chart-package ## Push the packaged chart to the configured OCI registry (requires login).
+	$(HELM) push dist/llm-operator-$(CHART_VERSION).tgz $(CHART_OCI_REGISTRY)
 
 .PHONY: deploy
 deploy: manifests ## Deploy to cluster.
@@ -109,6 +143,11 @@ $(CONTROLLER_GEN):
 
 $(KUSTOMIZE):
 	GOBIN=$(shell pwd)/bin go install sigs.k8s.io/kustomize/kustomize/v5@$(KUSTOMIZE_VERSION)
+
+.PHONY: helm
+helm: $(HELM) ## Install the pinned repository-local Helm binary.
+$(HELM):
+	GOBIN=$(shell pwd)/bin go install helm.sh/helm/v3/cmd/helm@$(HELM_VERSION)
 
 .PHONY: envtest
 envtest: $(ENVTEST) ## Download envtest tools.
