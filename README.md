@@ -13,7 +13,7 @@ The target architecture replaces the monolithic proxy controller with CRDs, a le
 | ✅ Complete | Milestone 2 — backend drivers | vLLM, SGLang, and llama.cpp drivers own runtime arguments, health, discovery, metadata, and cache requests. |
 | ✅ Accepted | Milestone 3 — Flux observation-mode validation | The non-production cluster rollout passed its initial passive checks. The sustained window was explicitly waived; transitions remain disabled. |
 | ✅ Accepted | Milestone 4 — migration and proxy dual read | The non-production comparison passed for four valid models and the Gemma overlay. CRs are authoritative; ConfigMaps remain rollback until the deferred Fable/vanilla cleanup. |
-| ⬜ TODO | Milestone 5 — controlled cutover | Extract cache-manager, add end-to-end tests, canary operator-owned transitions, and rollback validation. |
+| ✅ Complete | Milestone 5 — controlled cutover | Accepted for the non-production cluster: the standalone cache-manager is in use, the proxy is read-only, and the operator completed a stable Gemma activation. |
 | ⬜ TODO | Milestone 6 — production hardening | Admission webhooks, Flux ownership, dashboards/alerts, runbooks, and ConfigMap retirement. |
 
 Transitions are disabled by default. Do not enable them or apply sample CRs to a live cluster until the observation-mode preconditions and workload-reference review in [observation validation](plans/observation_validation.md) are complete.
@@ -166,12 +166,13 @@ existing proxy-managed installation. Enable them only after migration by passing
 - [x] Verify the CR-first catalog, Gemma overlay, proxy readiness, and cache hot path after accepting the legacy proxy's intentional Gemma activation.
 - [x] Compare the valid ConfigMap and CR-first catalogs: four models and the Gemma overlay match exactly in identity, ordered args, and defaults. Explicitly exclude invalid Fable/vanilla entries and retain ConfigMaps as rollback.
 
-### TODO — controlled cutover
+### Complete — controlled cutover
 
-- [ ] Deploy cache-manager as a standalone workload with the required cache volumes.
-- [ ] Add runtime/container integration tests for successful and failed transitions.
-- [ ] Disable proxy controller behavior, then enable operator transitions for a canary backend/model pair.
-- [ ] Exercise rollback before expanding the cutover.
+- [x] Add a proxy mutation gate and an operator transition canary allowlist; both default to the current safe behavior.
+- [x] Define and validate the `iggy`-pinned standalone cache-manager against the existing hot-cache path, then repoint the proxy and remove its sidecar.
+- [x] Disable proxy deployment mutations and complete a stable, operator-owned Gemma activation through the cache service.
+- [ ] Eventual TODO: add runtime/container integration tests for successful and failed transitions.
+- [ ] Eventual TODO: add a repeatable canary/rollback exercise before any production cutover.
 
 ### TODO — production hardening
 

@@ -168,19 +168,29 @@ when backed by CRDs, with ConfigMap fallback still available.
 
 **Goal:** move transition ownership from the proxy to the operator.
 
-1. Extend the operator chart with the optional standalone cache-manager
-   Deployment and Service, including the required hot/cold cache volumes.
-2. Add kind or equivalent integration tests with a mock runtime and
-   cache-manager for end-to-end transitions.
-3. Disable proxy controller behavior while retaining reverse proxy, overlays,
-   Hermes endpoints, and CLI utilities.
-4. Enable operator transitions for one canary backend/model pair.
-5. Exercise rollback: disable transitions, restore proxy control, and verify
-   active model recovery.
-6. Expand the cutover only after canary metrics and transition logs are clean.
+1. **Complete foundation:** add an operator transition allowlist and a proxy
+   mutation gate. Both preserve current behavior by default; the proxy can be
+   made catalog/overlay-only before any operator canary is enabled.
+2. **Complete foundation:** define a standalone shadow cache-manager Deployment
+   and Service in Cogito. It is `iggy`-pinned and reuses the existing RWO hot
+   cache claims and NFS cold cache, but the live proxy remains on its localhost
+   sidecar until the service behavior is compared.
+3. **Complete for the non-production scope:** compare the shadow cache-manager
+   to the sidecar, repoint the proxy, remove its sidecar, and disable proxy
+   deployment mutations while retaining reverse proxy, overlays, Hermes
+   endpoints, and CLI utilities.
+4. **Complete for the non-production scope:** enable operator transitions and
+   complete a stable Gemma activation through the standalone cache service.
+5. **Eventual TODO:** add kind or equivalent runtime/container integration
+   tests with a mock runtime and cache-manager for successful and failed
+   transitions.
+6. **Eventual TODO:** exercise a repeatable canary/rollback path before any
+   production cutover.
 
-**Exit criteria:** operator completes successful and failed transitions with a
-tested rollback path; proxy no longer mutates backend Deployments.
+**Accepted non-production exit:** the operator completed a stable Gemma
+transition through the standalone cache service and the proxy no longer mutates
+backend Deployments. Successful/failed runtime integration coverage and a
+tested rollback path remain eventual TODOs before production use.
 
 ## Milestone 6 — Production Hardening and ConfigMap Retirement
 

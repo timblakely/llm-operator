@@ -19,6 +19,7 @@ package main
 import (
 	"flag"
 	"os"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -49,6 +50,7 @@ func main() {
 	var metricsAddr string
 	var enableLeaderElection bool
 	var enableTransitions bool
+	var transitionCanaryModels string
 	var probeAddr string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8081", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8082", "The address the probe endpoint binds to.")
@@ -57,6 +59,8 @@ func main() {
 			"Enabling this will ensure there is only one active controller manager.")
 	flag.BoolVar(&enableTransitions, "enable-transitions", false,
 		"Allow LLMActiveModel to mutate backend Deployments. Disabled by default for safe proxy coexistence.")
+	flag.StringVar(&transitionCanaryModels, "transition-canary-models", "",
+		"Comma-separated canonical model names allowed to transition when transitions are enabled; empty permits all models.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -95,10 +99,11 @@ func main() {
 		os.Exit(1)
 	}
 	if err = (&controller.LLMActiveModelReconciler{
-		Client:             mgr.GetClient(),
-		Scheme:             mgr.GetScheme(),
-		Recorder:           mgr.GetEventRecorderFor("llmactivemodel-controller"),
-		TransitionsEnabled: enableTransitions,
+		Client:                  mgr.GetClient(),
+		Scheme:                  mgr.GetScheme(),
+		Recorder:                mgr.GetEventRecorderFor("llmactivemodel-controller"),
+		TransitionsEnabled:      enableTransitions,
+		AllowedTransitionModels: parseTransitionCanaryModels(transitionCanaryModels),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "LLMActiveModel")
 		os.Exit(1)
@@ -124,4 +129,14 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+func parseTransitionCanaryModels(value string) map[string]struct{} {
+	allowed := make(map[string]struct{})
+	for _, model := range strings.Split(value, ",") {
+		if model = strings.TrimSpace(model); model != "" {
+			allowed[model] = struct{}{}
+		}
+	}
+	return allowed
 }

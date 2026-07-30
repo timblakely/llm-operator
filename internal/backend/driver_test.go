@@ -192,10 +192,11 @@ func TestDriverCacheRequestContracts(t *testing.T) {
 		backend        cogitodevv1alpha1.BackendType
 		wantRepository string
 		wantFormat     CacheFormat
+		wantCacheKind  string
 	}{
-		{backend: cogitodevv1alpha1.BackendVLLM, wantRepository: "acme/source", wantFormat: CacheFormatHuggingFace},
-		{backend: cogitodevv1alpha1.BackendSGLang, wantRepository: "acme/source", wantFormat: CacheFormatHuggingFace},
-		{backend: cogitodevv1alpha1.BackendLlamaCpp, wantRepository: "acme/gguf", wantFormat: CacheFormatGGUF},
+		{backend: cogitodevv1alpha1.BackendVLLM, wantRepository: "acme/source", wantFormat: CacheFormatHuggingFace, wantCacheKind: "huggingface-hub"},
+		{backend: cogitodevv1alpha1.BackendSGLang, wantRepository: "acme/source", wantFormat: CacheFormatHuggingFace, wantCacheKind: "huggingface-hub"},
+		{backend: cogitodevv1alpha1.BackendLlamaCpp, wantRepository: "acme/gguf", wantFormat: CacheFormatGGUF, wantCacheKind: "huggingface-files"},
 	}
 	for _, tt := range tests {
 		t.Run(string(tt.backend), func(t *testing.T) {
@@ -214,7 +215,7 @@ func TestDriverCacheRequestContracts(t *testing.T) {
 			if driver.Capabilities().CacheFormat != tt.wantFormat {
 				t.Fatalf("cache format = %q, want %q", driver.Capabilities().CacheFormat, tt.wantFormat)
 			}
-			if request.Cache.RepoID != tt.wantRepository || request.Cache.Kind != string(tt.backend) || request.Cache.Size != 2*1024*1024*1024 {
+			if request.Cache.RepoID != tt.wantRepository || request.Cache.Kind != tt.wantCacheKind || request.Cache.Size != 2*1024*1024*1024 {
 				t.Fatalf("cache request = %#v", request)
 			}
 		})

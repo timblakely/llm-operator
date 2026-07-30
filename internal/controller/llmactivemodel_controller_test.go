@@ -89,6 +89,37 @@ func TestActivateDeploymentPreservesSidecars(t *testing.T) {
 	}
 }
 
+func TestActivateDeploymentIsIdempotentAfterActivation(t *testing.T) {
+	t.Parallel()
+
+	scheme := testScheme(t)
+	deployment := testDeployment()
+	model := testModel()
+	backend := testBackend()
+	active := &cogitodevv1alpha1.LLMActiveModel{ObjectMeta: metav1.ObjectMeta{Name: "active", Namespace: "llm"}}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(deployment).Build()
+	reconciler := &LLMActiveModelReconciler{Client: client, Scheme: scheme}
+
+	if err := reconciler.activateDeployment(context.Background(), active, model, backend); err != nil {
+		t.Fatal(err)
+	}
+	var first appsv1.Deployment
+	if err := client.Get(context.Background(), types.NamespacedName{Name: deployment.Name, Namespace: deployment.Namespace}, &first); err != nil {
+		t.Fatal(err)
+	}
+	switchedAt := first.Spec.Template.Annotations[switchedAtAnno]
+	if err := reconciler.activateDeployment(context.Background(), active, model, backend); err != nil {
+		t.Fatal(err)
+	}
+	var second appsv1.Deployment
+	if err := client.Get(context.Background(), types.NamespacedName{Name: deployment.Name, Namespace: deployment.Namespace}, &second); err != nil {
+		t.Fatal(err)
+	}
+	if got := second.Spec.Template.Annotations[switchedAtAnno]; got != switchedAt {
+		t.Fatalf("repeated activation changed switched-at from %q to %q", switchedAt, got)
+	}
+}
+
 func testScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	scheme := runtime.NewScheme()

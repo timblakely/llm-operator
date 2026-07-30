@@ -27,6 +27,9 @@ leaderElection:
 # LLMActiveModel controller to mutate referenced backend Deployments.
 transitions:
   enabled: false
+  # Optional comma-separated canonical model names. When non-empty, enabled
+  # transitions are limited to this reviewed canary set.
+  canaryModels: ""
 
 metrics:
   bindAddress: ":8081"

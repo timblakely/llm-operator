@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"reflect"
 	"sort"
 	"sync"
 	"time"
@@ -71,6 +72,9 @@ type LLMActiveModelReconciler struct {
 	// TransitionsEnabled prevents Deployment/cache mutation while the operator
 	// is being evaluated beside the legacy proxy. It must be explicitly enabled.
 	TransitionsEnabled bool
+	// AllowedTransitionModels restricts enabled transitions to an explicit canary
+	// set. An empty set permits all models for backwards compatibility.
+	AllowedTransitionModels map[string]struct{}
 
 	// transitionMu is a second line of defense around Deployment/cache mutation.
 	// The controller is also configured with MaxConcurrentReconciles=1.
@@ -154,6 +158,16 @@ func (r *LLMActiveModelReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
+	}
+	if len(r.AllowedTransitionModels) > 0 {
+		if _, allowed := r.AllowedTransitionModels[model.Spec.Model.Name]; !allowed {
+			activeModel.Status.Phase = cogitodevv1alpha1.ActiveModelPhaseFailed
+			setActiveCondition(&activeModel.Status, ModelActiveCondition, metav1.ConditionFalse, "CanaryDenied", fmt.Sprintf("model %q is not in the transition canary allowlist", model.Spec.Model.Name))
+			if err := r.Status().Update(ctx, &activeModel); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{}, nil
+		}
 	}
 
 	// Execute transition
@@ -350,9 +364,11 @@ func (r *LLMActiveModelReconciler) executeTransition(ctx context.Context, active
 		return transitionCheckResult(err, logger)
 	}
 
-	// Step 5: Health check
+	// Step 5: Wait for runtime health. A Deployment can become available before
+	// the runtime has accepted its first connection, so a single refused dial is
+	// not a transition failure.
 	backendURL := fmt.Sprintf("http://%s:%d", backend.Spec.ServiceRef.Name, backend.Spec.Port)
-	if err := driver.CheckHealth(transitionCtx, r.httpClient(), backendURL); err != nil {
+	if err := r.waitForBackendHealth(transitionCtx, driver, backendURL, checkCurrent); err != nil {
 		logger.Error(err, "backend health check failed")
 		return r.failTransition(ctx, activeModel, model.Spec.Model.Name, "HealthCheckFailed", "health_check_failed", err)
 	}
@@ -424,6 +440,28 @@ func (r *LLMActiveModelReconciler) executeTransition(ctx context.Context, active
 	return ctrl.Result{}, nil
 }
 
+func (r *LLMActiveModelReconciler) waitForBackendHealth(ctx context.Context, driver runtimebackend.Driver, backendURL string, checkCurrent func() error) error {
+	var lastErr error
+	for {
+		if err := checkCurrent(); err != nil {
+			return err
+		}
+		if err := driver.CheckHealth(ctx, r.httpClient(), backendURL); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		select {
+		case <-ctx.Done():
+			if lastErr != nil {
+				return fmt.Errorf("backend did not become healthy: %w", lastErr)
+			}
+			return ctx.Err()
+		case <-time.After(r.probeInterval()):
+		}
+	}
+}
+
 var errTransitionChanged = errors.New(errTransitionCancelled)
 
 func (r *LLMActiveModelReconciler) ensureTransitionCurrent(ctx context.Context, activeModel *cogitodevv1alpha1.LLMActiveModel, targetModel string, generation int64) error {
@@ -465,15 +503,25 @@ func (r *LLMActiveModelReconciler) activateDeployment(ctx context.Context, activ
 	}
 	base := deployment.DeepCopy()
 	one := int32(1)
-	deployment.Spec.Replicas = &one
-	if deployment.Spec.Template.Annotations == nil {
-		deployment.Spec.Template.Annotations = make(map[string]string)
+	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != one {
+		deployment.Spec.Replicas = &one
 	}
-	deployment.Spec.Template.Annotations[activeModelAnno] = model.Spec.Model.Name
-	deployment.Spec.Template.Annotations[switchedAtAnno] = time.Now().UTC().Format(time.RFC3339Nano)
 	for i := range deployment.Spec.Template.Spec.Containers {
 		if deployment.Spec.Template.Spec.Containers[i].Name == backend.Spec.ContainerName {
-			deployment.Spec.Template.Spec.Containers[i].Args = effectiveArgs(model)
+			desiredArgs := effectiveArgs(model)
+			argsChanged := !reflect.DeepEqual(deployment.Spec.Template.Spec.Containers[i].Args, desiredArgs)
+			activeChanged := deployment.Spec.Template.Annotations == nil || deployment.Spec.Template.Annotations[activeModelAnno] != model.Spec.Model.Name
+			if argsChanged || activeChanged {
+				if deployment.Spec.Template.Annotations == nil {
+					deployment.Spec.Template.Annotations = make(map[string]string)
+				}
+				deployment.Spec.Template.Annotations[activeModelAnno] = model.Spec.Model.Name
+				deployment.Spec.Template.Annotations[switchedAtAnno] = time.Now().UTC().Format(time.RFC3339Nano)
+				deployment.Spec.Template.Spec.Containers[i].Args = desiredArgs
+			}
+			if reflect.DeepEqual(base.Spec, deployment.Spec) {
+				return nil
+			}
 			return r.Patch(ctx, &deployment, client.MergeFrom(base))
 		}
 	}

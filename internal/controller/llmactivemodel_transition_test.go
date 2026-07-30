@@ -37,6 +37,26 @@ func TestTransitionTargetContainerMissing(t *testing.T) {
 	assertActiveFailure(t, kubeClient, active, "PatchFailed")
 }
 
+func TestTransitionCanaryAllowlistPreventsMutation(t *testing.T) {
+	t.Parallel()
+
+	model := modelFor("target", "acme/target", cogitodevv1alpha1.BackendVLLM)
+	backend := backendFor("vllm", "target-deployment", "vllm", cogitodevv1alpha1.BackendVLLM)
+	deployment := deploymentFor("target-deployment", "vllm", 0, true)
+	active := activeFor("active", model.Spec.Model.Name)
+	reconciler, kubeClient := transitionReconciler(t, successHTTPClient(), deployment, model, backend, active)
+	reconciler.AllowedTransitionModels = map[string]struct{}{"acme/other": {}}
+
+	reconcileActive(t, reconciler, active)
+	assertActiveFailure(t, kubeClient, active, "CanaryDenied")
+
+	var gotDeployment appsv1.Deployment
+	getObject(t, kubeClient, deployment, &gotDeployment)
+	if gotDeployment.Spec.Replicas == nil || *gotDeployment.Spec.Replicas != 0 {
+		t.Fatalf("canary-denied transition changed replicas to %v", gotDeployment.Spec.Replicas)
+	}
+}
+
 func TestTransitionCacheManagerUnavailable(t *testing.T) {
 	t.Parallel()
 

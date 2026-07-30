@@ -2,8 +2,8 @@ apiVersion: v2
 name: llm-operator
 description: Kubernetes operator for LLM serving backends
 type: application
-version: 0.1.2
-appVersion: "0.1.2"
+version: 0.1.5
+appVersion: "0.1.5"
 kubeVersion: ">=1.28.0-0"
 home: https://github.com/timblakely/llm-operator
 sources:

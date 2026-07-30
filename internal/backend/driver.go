@@ -244,7 +244,7 @@ func (d runtimeDriver) CacheRequest(model *cogitodevv1alpha1.LLMModel) (*cache.C
 		repository = model.Spec.Model.ArtifactRepository
 	}
 	cacheSpec := cache.CacheSpec{
-		Kind:     string(d.kind),
+		Kind:     cacheManagerKind(d.capabilities.CacheFormat),
 		RepoID:   repository,
 		Revision: model.Spec.Model.Revision,
 		Files:    append([]string(nil), model.Spec.Artifact.Files...),
@@ -261,6 +261,17 @@ func (d runtimeDriver) CacheRequest(model *cogitodevv1alpha1.LLMModel) (*cache.C
 		Backend: string(d.kind),
 		Cache:   cacheSpec,
 	}, nil
+}
+
+func cacheManagerKind(format CacheFormat) string {
+	switch format {
+	case CacheFormatHuggingFace:
+		return "huggingface-hub"
+	case CacheFormatGGUF:
+		return "huggingface-files"
+	default:
+		return string(format)
+	}
 }
 
 func getText(ctx context.Context, httpClient HTTPDoer, url string, limit int64) (string, error) {

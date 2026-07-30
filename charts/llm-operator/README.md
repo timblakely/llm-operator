@@ -72,6 +72,7 @@ see [Releasing the Manager Image and Helm Chart](../../docs/releasing.md).
 | `replicaCount` | `2` | Manager replicas |
 | `leaderElection.enabled` | `true` | Serialize controller ownership across replicas |
 | `transitions.enabled` | `false` | Permit backend Deployment mutation |
+| `transitions.canaryModels` | `""` | Comma-separated canonical model allowlist when transitions are enabled |
 | `metrics.service.enabled` | `true` | Create the metrics Service |
 | `cacheManager.url` | empty | Optional standalone cache-manager URL |
 | `resources` | see values | Manager requests and limits |
