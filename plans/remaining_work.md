@@ -151,18 +151,14 @@ rollback source of truth.
    request defaults. CR catalog entries expose `config_source=crd/...` and
    diagnostics prove duplicate ConfigMaps are skipped.
 
-**Current non-production state:** the M4 proxy rollout intentionally activated
-`google/gemma-4-31B-it-qat-w4a16-ct` through the legacy proxy. vLLM is 1/1
-ready, the CR-first catalog and Gemma overlay are healthy, and cache-manager
-reports the artifact hot. This is not operator-controlled: transitions remain
-disabled in the operator and Laguna remains stopped. The invalid Fable model
-and its overlays are explicitly excluded because they use the pre-existing
-missing `llm-llama-cpp` backend and a controller-injected model argument. Keep
-ConfigMaps as the rollback source; resolve those legacy entries before
-ConfigMap retirement.
+**Historical non-production state:** M4 compared four valid models and the
+Gemma overlay while the proxy temporarily supported CR-first dual read. M5
+then moved stable Gemma activation to the operator. M6 retired the fallback
+and deleted the nine legacy model/overlay ConfigMaps; vLLM serves the CR-only
+catalog and Laguna remains stopped.
 
-**Exit criteria:** proxy output is equivalent for a representative model catalog
-when backed by CRDs, with ConfigMap fallback still available.
+**Exit criteria:** met historically; proxy output matched the representative
+catalog under CR-first reading before fallback retirement in M6.
 
 ## Milestone 5 — Controlled Transition Cutover
 
@@ -196,20 +192,24 @@ tested rollback path remain eventual TODOs before production use.
 
 **Goal:** make the operator the production control plane.
 
-1. Add validating admission webhooks for duplicate canonical model names,
-   backend availability, parser capabilities, and unsafe arguments.
-2. Configure Flux ownership/drift exceptions so Helm owns static operator and
-   backend-template fields while the operator owns replicas, activation
-   annotations, and runtime container arguments.
-3. Add dashboards and alerts for transition duration/failures, backend health,
-   cache failures, and leader-election availability.
-4. Write operational runbooks: add backend, add model, activate model, rollback,
-   cache recovery, and incident diagnostics.
-5. Remove ConfigMap fallback and archive the migration utility after an agreed
-   retention period.
+1. **Complete:** add validating admission handlers for duplicate canonical model
+   names, backend availability, and unsafe runtime arguments.
+2. **Complete:** document and narrow Flux ownership/drift exceptions for
+   operator-owned replicas, activation annotations, and runtime arguments.
+3. **Complete:** add operator/cache ServiceMonitors, alerts, and dashboards.
+4. **Complete:** add per-app operational runbooks for activation, cache recovery,
+   ownership, and incident diagnostics.
+5. **Complete:** remove model/overlay ConfigMap fallback and legacy resources;
+   retain `llm-model-status` only for runtime metadata. The one-shot cleanup
+   Job removed the nine ConfigMaps orphaned by the old `prune: false` parent.
+   CR sources are encoded as `crd__<resource>` in ConfigMap data keys because
+   Kubernetes keys cannot contain `/`; the metadata payload retains the
+   original model identity.
 
-**Exit criteria:** ConfigMaps and proxy controller logic are retired, with
-documented operations and monitored production SLOs.
+**Exit criteria:** met and live-validated in Cogito. Model/overlay ConfigMaps
+and proxy fallback logic are retired, CR-safe runtime/model-card metadata is
+persisted, and operations plus monitored transition/cache signals are
+documented.
 
 ## Recommended Execution Order
 

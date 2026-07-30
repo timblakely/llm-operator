@@ -2,12 +2,13 @@
 
 ## Status
 
-**Initial passive-observation rollout passed on 2026-07-29; the sustained
-observation window is pending.**
+> Historical record: the passive-observation rollout passed on 2026-07-29.
+> M5 and M6 have since completed in Cogito; use `remaining_work.md` for the
+> current milestone state.
 
 The sustained window was explicitly waived for this non-production cluster on
-2026-07-29. This accepts Milestone 3 for planning purposes only; transitions
-remain disabled and the rollback constraints below still apply.
+2026-07-29. That accepted M3 for planning purposes; later M5 enabled the
+reviewed non-production handoff and M6 retired the ConfigMap control plane.
 
 Cogito context `main` (API `https://k8s.internal:6443`) now has a healthy,
 Flux-managed operator release in namespace `llm`:

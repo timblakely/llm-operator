@@ -31,6 +31,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	cogitodevv1alpha1 "github.com/timblakely/llm-operator/api/cogito.dev/v1alpha1"
+	operatoradmission "github.com/timblakely/llm-operator/internal/admission"
 	"github.com/timblakely/llm-operator/internal/controller"
 	"github.com/timblakely/llm-operator/internal/metrics"
 )
@@ -51,6 +52,7 @@ func main() {
 	var enableLeaderElection bool
 	var enableTransitions bool
 	var transitionCanaryModels string
+	var enableAdmissionWebhooks bool
 	var probeAddr string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8081", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8082", "The address the probe endpoint binds to.")
@@ -61,6 +63,8 @@ func main() {
 		"Allow LLMActiveModel to mutate backend Deployments. Disabled by default for safe proxy coexistence.")
 	flag.StringVar(&transitionCanaryModels, "transition-canary-models", "",
 		"Comma-separated canonical model names allowed to transition when transitions are enabled; empty permits all models.")
+	flag.BoolVar(&enableAdmissionWebhooks, "enable-admission-webhooks", false,
+		"Register validating admission webhooks. Requires a serving certificate and ValidatingWebhookConfiguration.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -114,6 +118,14 @@ func main() {
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "LLMBackend")
 		os.Exit(1)
+	}
+	if enableAdmissionWebhooks {
+		if err := ctrl.NewWebhookManagedBy(mgr, &cogitodevv1alpha1.LLMModel{}).
+			WithValidator(&operatoradmission.LLMModelValidator{Reader: mgr.GetClient()}).
+			Complete(); err != nil {
+			setupLog.Error(err, "unable to create validating webhook", "webhook", "LLMModel")
+			os.Exit(1)
+		}
 	}
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up health check")

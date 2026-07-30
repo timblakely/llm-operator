@@ -1,5 +1,11 @@
 # Implementation Plan
 
+> Historical architecture and task decomposition. The current execution
+> record is `remaining_work.md`: M0–M6 are complete in Cogito, including the
+> CR-only proxy and legacy ConfigMap retirement. Remaining work is limited to
+> runtime/container integration coverage and a repeatable production rollback
+> exercise.
+
 ## Goal
 
 Build a lightweight Kubernetes Operator (controller-runtime + Kubebuilder, Go) that replaces the current ConfigMap + vllm-proxy monolith with proper CRDs, a controller manager with leader election, a decoupled API proxy, and a clean migration path from the existing system.

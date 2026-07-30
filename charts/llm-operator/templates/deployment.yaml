@@ -51,6 +51,7 @@ spec:
             - {{ printf "--leader-elect=%t" .Values.leaderElection.enabled | quote }}
             - {{ printf "--enable-transitions=%t" .Values.transitions.enabled | quote }}
             - {{ printf "--transition-canary-models=%s" .Values.transitions.canaryModels | quote }}
+            - {{ printf "--enable-admission-webhooks=%t" .Values.admission.enabled | quote }}
             - {{ printf "--health-probe-bind-address=%s" .Values.health.bindAddress | quote }}
             - {{ printf "--metrics-bind-address=%s" .Values.metrics.bindAddress | quote }}
           ports:
