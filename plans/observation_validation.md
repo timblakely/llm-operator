@@ -2,25 +2,46 @@
 
 ## Status
 
-**Infrastructure deployment complete on 2026-07-28; workload observation is pending.**
+**Initial passive-observation rollout passed on 2026-07-29; the sustained
+observation window is pending.**
+
+The sustained window was explicitly waived for this non-production cluster on
+2026-07-29. This accepts Milestone 3 for planning purposes only; transitions
+remain disabled and the rollback constraints below still apply.
 
 Cogito context `main` (API `https://k8s.internal:6443`) now has a healthy,
 Flux-managed operator release in namespace `llm`:
 
 - `OCIRepository/llm-operator` is Ready at chart digest
-  `sha256:ca9a4c438302625f10bde4fa0c9df24f0eb8dcd021e4047fd1ea1644fd13b4f5`.
-- `HelmRelease/llm-operator` is Ready/Released at chart `0.1.0` (release v2).
+  `sha256:02893675f50e7c41a6ec0254c1e47fc699f2981d7371bdf8485e542405a985d4`.
+- `HelmRelease/llm-operator` is Ready/Released at chart/app `0.1.2` (release
+  v4).
 - `Deployment/llm-operator` is 2/2 ready and available; both Pods are Running
   with zero restarts and use manager image digest
-  `sha256:3ff7d49a889437e17defddd23e36b4acd92ef092f4d5171c0a30f1268e806996`.
+  `sha256:56863a45d3c63d11eadb5d08330deb3ea7dc4e74b8ca399a38d0f9e858e6a596`.
 - The live manager arguments include exactly `--enable-transitions=false` and
   leader election is active. All four CRDs are Established and controller logs
   have no current warnings or errors.
 
-Initial OCI authorization and image-pull failures occurred during first
-installation, but Flux recovered and the current release is healthy. No
-`LLMBackend`, `LLMModel`, `LLMModelOverlay`, or `LLMActiveModel` instances exist
-yet, so no workload or proxy observation has been performed.
+Both Flux Kustomizations are Ready and reconcile two `LLMBackend`s, four
+`LLMModel`s, and the Gemma overlay. Both backends correctly report their
+existing zero-replica Deployments; all models report `ModelConfigured=True` and
+`Ready`; the overlay reports `OverlayValid=True`. There is no
+`LLMActiveModel`. Workload replicas, container arguments, active-model
+annotations, proxy Pods, and backend Pods were unchanged by the rollout.
+
+The Fable Fusion model and its overlays are intentionally excluded: its
+pre-existing proxy catalog configuration uses an unsupported backend, a
+controller-injected model argument, and a non-existent deployment. The live
+vLLM Gemma annotation versus Fable argument mismatch remains a recorded proxy
+drift, not an operator-owned change.
+
+During the subsequent M4 CR-first proxy rollout, the legacy proxy's existing
+startup reconciliation intentionally activated Gemma. vLLM is now 1/1 ready on
+the reviewed Gemma revision; the proxy catalog and cache-manager hot path are
+healthy, and Laguna remains stopped. This is a legacy-proxy action, not an
+operator transition. The proxy continues to warn about the separate missing
+`llm-llama-cpp` backend, which must remain visible in the migration comparison.
 
 There is also a validation-scope gap in the current controller behavior:
 observation mode records backend health and activation annotations, but runtime
@@ -40,11 +61,11 @@ passive metadata/status observation is designed, comparison must use
   consistent through `make check`.
 - `make chart-check` proves the Helm chart CRDs match the generated manifests,
   the manager image is digest-pinned, and transitions render disabled by
-  default. The chart is version `0.1.0` at the intended OCI artifact URL
+  default. The chart is version `0.1.2` at the intended OCI artifact URL
   `oci://ghcr.io/timblakely/charts/llm-operator`.
 - Transition mutation remains opt-in in manager code and manifests.
 
-## Remaining preconditions for workload observation
+## Remaining work for the observation window
 
 1. Confirm the already-deployed release remains healthy before each workload
    change:
@@ -54,26 +75,21 @@ passive metadata/status observation is designed, comparison must use
    kubectl -n llm rollout status deployment/llm-operator
    ```
 
-2. Inventory the real resource names before committing workload CRs:
+2. Record a baseline and periodically inspect the reconciled resources:
 
    ```bash
+   kubectl -n llm get llmbackend,llmmodel,llmmodeloverlay -o wide
+   kubectl -n llm logs deployment/llm-operator --since=1h
    kubectl -n llm get deployment,service,pod -o wide
-   kubectl -n llm get configmap
-   kubectl get crd | grep llm.cogito.dev || true
    ```
 
-3. Review `deploymentRef`, `containerName`, `serviceRef`, port, model source,
-   and revision in the sample CRs against that inventory. Do not apply a sample
-   merely because its historical name resembles a live workload.
-
-4. Add only the reviewed workload CRs to Cogito's reserved
-   `kubernetes/apps/llm/llm-operator/resources/` directory and include them in
-   its Kustomization. Do not add repository samples wholesale.
+3. Compare the recorded baseline at the end of the agreed window and document
+   any status, proxy-catalog, or workload-field mismatch before M4.
 
 ## Observation procedure
 
-The operator chart is already reconciled. Before adding the first workload CR,
-capture a fresh baseline for the observation window:
+The operator chart and reviewed workload CRs are already reconciled. Capture a
+fresh baseline at the start of the sustained observation window:
 
 ```bash
 kubectl -n llm get deployment -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.replicas}{"\t"}{.spec.template.metadata.annotations.llm\.cogito\.dev/active-model}{"\t"}{range .spec.template.spec.containers[*]}{.name}{"="}{.args}{";"}{end}{"\n"}{end}' \

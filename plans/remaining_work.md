@@ -27,12 +27,12 @@ after the controlled-cutover gate.
   RBAC, and manager deployment manifests exist.
 - The `charts/llm-operator` OCI chart packages only operator infrastructure,
   requires a digest-pinned manager image, and defaults transitions to disabled.
-- Cogito has reconciled chart `0.1.0` at digest
-  `sha256:ca9a4c438302625f10bde4fa0c9df24f0eb8dcd021e4047fd1ea1644fd13b4f5`
+- Cogito has reconciled chart/app `0.1.2` at digest
+  `sha256:02893675f50e7c41a6ec0254c1e47fc699f2981d7371bdf8485e542405a985d4`
   and manager image digest
-  `sha256:3ff7d49a889437e17defddd23e36b4acd92ef092f4d5171c0a30f1268e806996`.
-  The `OCIRepository` and `HelmRelease` are Ready and the manager Deployment
-  is 2/2 available with transitions disabled.
+  `sha256:56863a45d3c63d11eadb5d08330deb3ea7dc4e74b8ca399a38d0f9e858e6a596`.
+  Both Flux Kustomizations, the `OCIRepository`, and `HelmRelease` are Ready;
+  the manager Deployment is 2/2 available with transitions disabled.
 - vLLM, SGLang, and llama.cpp have runtime-specific launch-argument drivers.
 - `--enable-transitions=false` is the deployment default.
 - Unit tests cover driver behavior, disabled-transition safety, and
@@ -104,19 +104,22 @@ observations to the live system without changing it.
    `CreateReplace` CRD policy for install and upgrade and sets
    `transitions.enabled=false`.
 3. **Complete:** publish the manager image and chart to GHCR with reviewed
-   immutable digests and commit the Cogito GitOps resources. Chart digest:
-   `sha256:ca9a4c438302625f10bde4fa0c9df24f0eb8dcd021e4047fd1ea1644fd13b4f5`;
+   immutable digests and commit the Cogito GitOps resources. Current chart
+   digest: `sha256:02893675f50e7c41a6ec0254c1e47fc699f2981d7371bdf8485e542405a985d4`;
    image digest:
-   `sha256:3ff7d49a889437e17defddd23e36b4acd92ef092f4d5171c0a30f1268e806996`.
-4. **Complete:** reconcile the Flux source and HelmRelease. On 2026-07-28,
-   both were Ready, the manager was 2/2 available, and its exact runtime
-   argument included `--enable-transitions=false`.
-5. **TODO:** create separately reviewed `LLMBackend` and `LLMModel` CRs representing the existing vLLM and
-   llama.cpp deployments.
-6. **TODO:** verify model, backend, and overlay conditions; expose the metrics Service to
-   Prometheus.
-7. **TODO:** compare operator-derived runtime metadata and active-model status with the
-   proxy's current state.
+   `sha256:56863a45d3c63d11eadb5d08330deb3ea7dc4e74b8ca399a38d0f9e858e6a596`.
+4. **Complete:** reconcile Flux. The manager is 2/2 available and its exact
+   runtime argument includes `--enable-transitions=false`.
+5. **Complete:** reconcile separately reviewed `LLMBackend` and `LLMModel` CRs
+   for vLLM and llama.cpp, plus the valid Gemma overlay. Both backends report
+   their existing stopped Deployments; all models are `Ready`/`Configured` and
+   the overlay is valid.
+6. **In progress:** observe conditions, logs, metrics, and workload fields over
+   a sustained window. Verify Prometheus scraping separately.
+7. **In progress:** compare observations with the proxy. Runtime metadata and
+   inferred active-model status are intentionally unavailable in passive mode.
+   Exclude the known pre-existing Fable/Gemma proxy catalog drift until it is
+   corrected rather than masking it with CRs.
 8. **TODO:** record a GitOps rollback: suspend or revert the HelmRelease while keeping
    transitions disabled; existing workloads remain proxy-controlled.
 
@@ -129,13 +132,34 @@ reconciled by Flux from immutable artifacts.
 **Goal:** make CRDs the validated representation while ConfigMaps remain the
 rollback source of truth.
 
-1. Implement `hack/migration/configmap-to-crds.go` to convert model and overlay
-   ConfigMaps into deterministic CR YAML.
-2. Add fixture tests from existing vLLM and Laguna definitions.
-3. Update `vllm-proxy` to read CRDs with ConfigMap fallback, including overlay
-   resolution and `/v1/models` behavior.
-4. Add an explicit source-precedence policy and duplicate-model diagnostics.
-5. Run a staged migration: generate → review → apply CRs → compare proxy output.
+1. **Complete:** implement `hack/migration/configmap-to-crds.go` to convert
+   labeled model and overlay ConfigMaps into deterministic, reviewable CR YAML.
+   It is file-based and never writes to a cluster.
+2. **Complete:** add converter coverage for valid models/overlays, malformed
+   labeled input, non-ConfigMap input, canonical slash-containing base-model
+   names, and JSON request defaults.
+3. **Complete:** update `vllm-proxy` to read `LLMModel` and
+   `LLMModelOverlay` CRDs with ConfigMap fallback, including overlay resolution
+   and `/v1/models` source metadata.
+4. **Complete:** make CRs authoritative on duplicate logical names; retain
+   bounded diagnostics and a metric for skipped legacy ConfigMaps. The proxy
+   has read-only CR RBAC and never writes CR status.
+5. **Complete for the non-production scope:** render → convert → review →
+   compare the CR-first and ConfigMap-only catalogs/overlays. The four valid
+   models and Gemma overlay match in identity, source/revision, backend,
+   display name, context length, ordered arguments, artifact configuration, and
+   request defaults. CR catalog entries expose `config_source=crd/...` and
+   diagnostics prove duplicate ConfigMaps are skipped.
+
+**Current non-production state:** the M4 proxy rollout intentionally activated
+`google/gemma-4-31B-it-qat-w4a16-ct` through the legacy proxy. vLLM is 1/1
+ready, the CR-first catalog and Gemma overlay are healthy, and cache-manager
+reports the artifact hot. This is not operator-controlled: transitions remain
+disabled in the operator and Laguna remains stopped. The invalid Fable model
+and its overlays are explicitly excluded because they use the pre-existing
+missing `llm-llama-cpp` backend and a controller-injected model argument. Keep
+ConfigMaps as the rollback source; resolve those legacy entries before
+ConfigMap retirement.
 
 **Exit criteria:** proxy output is equivalent for a representative model catalog
 when backed by CRDs, with ConfigMap fallback still available.

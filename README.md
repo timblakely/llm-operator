@@ -2,7 +2,7 @@
 
 A Kubernetes Operator for managing LLM model serving backends (vLLM, SGLang, and llama.cpp). It is currently in an **observation-mode migration** from the legacy ConfigMap + `vllm-proxy` control plane.
 
-The target architecture replaces the monolithic proxy controller with CRDs, a leader-elected controller manager, a standalone cache-manager, and a read-only API proxy. The proxy CRD reader and migration tooling are not implemented yet.
+The target architecture replaces the monolithic proxy controller with CRDs, a leader-elected controller manager, a standalone cache-manager, and a read-only API proxy. The migration converter and proxy dual-read path are implemented; ConfigMaps remain the rollback source of truth until migration comparison is complete.
 
 ## Status
 
@@ -11,8 +11,8 @@ The target architecture replaces the monolithic proxy controller with CRDs, a le
 | ✅ Complete | Milestone 0 — render and API validation | Generated CRDs/RBAC, schema validation, reproducible rendering, and `make check` are in place. |
 | ✅ Complete | Milestone 1 — transition test gate | Fake-client and envtest coverage covers transition safety, cancellation, singleton ownership, and failure paths. |
 | ✅ Complete | Milestone 2 — backend drivers | vLLM, SGLang, and llama.cpp drivers own runtime arguments, health, discovery, metadata, and cache requests. |
-| 🟡 In progress | Milestone 3 — Flux observation-mode validation | The immutable chart and manager image are published and reconciled by Flux in Cogito. The manager is healthy with two ready replicas and transitions disabled; workload CR observation has not started. |
-| ⬜ TODO | Milestone 4 — migration and proxy dual read | Build ConfigMap-to-CRD conversion and add CRD reading with ConfigMap fallback to `vllm-proxy`. |
+| ✅ Accepted | Milestone 3 — Flux observation-mode validation | The non-production cluster rollout passed its initial passive checks. The sustained window was explicitly waived; transitions remain disabled. |
+| ✅ Accepted | Milestone 4 — migration and proxy dual read | The non-production comparison passed for four valid models and the Gemma overlay. CRs are authoritative; ConfigMaps remain rollback until the deferred Fable/vanilla cleanup. |
 | ⬜ TODO | Milestone 5 — controlled cutover | Extract cache-manager, add end-to-end tests, canary operator-owned transitions, and rollback validation. |
 | ⬜ TODO | Milestone 6 — production hardening | Admission webhooks, Flux ownership, dashboards/alerts, runbooks, and ConfigMap retirement. |
 
@@ -54,7 +54,7 @@ Do not treat this as an unconditional quick start. Cogito deployment is a Flux-m
 make observation-preflight
 ```
 
-Cogito reconciles chart version `0.1.0` from `oci://ghcr.io/timblakely/charts/llm-operator` through `OCIRepository` and `HelmRelease`, with `transitions.enabled=false`. The live release is pinned to chart digest `sha256:ca9a4c…b4f5` and manager image digest `sha256:3ff7d49a…6996`; it has two ready, leader-elected replicas. Follow the complete [observation procedure and rollback steps](plans/observation_validation.md). `make samples-apply` is intentionally not part of the default procedure because the samples must be reviewed for the target cluster first.
+Cogito reconciles chart version `0.1.2` from `oci://ghcr.io/timblakely/charts/llm-operator` through `OCIRepository` and `HelmRelease`, with `transitions.enabled=false`. The live release is pinned to chart digest `sha256:028936…85d4` and manager image digest `sha256:56863a…a596`; it has two ready, leader-elected replicas. The dependent resource Kustomization is also Ready with two `LLMBackend`s, four `LLMModel`s, and one `LLMModelOverlay`. Follow the complete [observation procedure and rollback steps](plans/observation_validation.md). `make samples-apply` is intentionally not part of the default procedure because the samples must be reviewed for the target cluster first.
 
 ### Docker
 
@@ -65,6 +65,21 @@ make docker-push
 
 For a releasable, digest-pinned manager image and matching OCI chart, follow
 [Releasing the Manager Image and Helm Chart](docs/releasing.md).
+
+### ConfigMap migration
+
+Render the legacy model and overlay ConfigMaps from GitOps, then convert the
+reviewed input into declarative CR YAML:
+
+```bash
+go run ./hack/migration/configmap-to-crds.go --input rendered-configmaps.yaml --output migrated-resources.yaml
+```
+
+The converter accepts only labeled `v1/ConfigMap` documents, preserves a
+`llm.cogito.dev/migrated-from-configmap` annotation, and never writes to a
+cluster. The Cogito proxy reads `LLMModel` and `LLMModelOverlay` resources
+first, then falls back to valid ConfigMaps. CRs win on duplicate logical model
+or overlay names; skipped legacy items are exposed through proxy diagnostics.
 
 ## Architecture
 
@@ -125,7 +140,7 @@ The operator exposes Prometheus metrics on `:8081`:
 
 ### Deployment
 
-The [Helm chart](charts/llm-operator/README.md) packages generated CRDs, RBAC, the manager Deployment, metrics Service, and PodDisruptionBudget. It renders two manager replicas by default with leader election, health probes, hardened security contexts, and transitions disabled. The manager image is required by immutable digest. Cogito consumes the versioned OCI chart through Flux; on 2026-07-28 the `OCIRepository` and `HelmRelease` were Ready, the Deployment was 2/2 available, and both Pods used the pinned manager digest with transitions disabled. No workload CRs have yet been applied.
+The [Helm chart](charts/llm-operator/README.md) packages generated CRDs, RBAC, the manager Deployment, metrics Service, and PodDisruptionBudget. It renders two manager replicas by default with leader election, health probes, hardened security contexts, and transitions disabled. The manager image is required by immutable digest. In Cogito, chart/app `0.1.2` is Ready with two manager replicas; four models are `Ready`/`Configured`, and the Gemma overlay is valid. During M4, the upgraded legacy proxy intentionally activated Gemma; vLLM is 1/1 ready with the reviewed Gemma revision, while Laguna remains stopped. The operator remains passive and does not own that activation.
 
 Model transitions are disabled by default so the operator can safely observe an
 existing proxy-managed installation. Enable them only after migration by passing
@@ -141,13 +156,15 @@ existing proxy-managed installation. Enable them only after migration by passing
 - [x] Create Cogito `OCIRepository` and `HelmRelease` resources with `transitions.enabled=false` and CRD `CreateReplace` policy.
 - [x] Publish reviewed immutable image and chart artifacts, pin their digests in Cogito, and reconcile through Flux.
 - [x] Verify the live manager is healthy: Flux sources Ready, two replicas available, leader election active, and transitions disabled.
-- [ ] Create reviewed workload CRs in Cogito and compare `LLMBackend` status/annotations to the proxy state over an observation window.
+- [x] Reconcile reviewed Cogito resources: two `LLMBackend`s, four `LLMModel`s, and one Gemma overlay; verify their initial status without workload mutation.
+- [x] Explicitly waive the sustained observation window for the non-production cluster. Keep the known Fable proxy/catalog drift excluded until it is corrected.
 
-### TODO — ConfigMap migration and proxy dual read
+### Accepted — ConfigMap migration and proxy dual read
 
-- [ ] Implement `hack/migration/configmap-to-crds.go` with fixtures from vLLM and Laguna ConfigMaps.
-- [ ] Add CRD reading plus ConfigMap fallback, source precedence, and duplicate diagnostics to `vllm-proxy`.
-- [ ] Compare proxy model catalog and overlay behavior between ConfigMap and CRD sources.
+- [x] Implement `hack/migration/configmap-to-crds.go` with deterministic typed conversion and unit coverage.
+- [x] Add CRD-first reading, ConfigMap fallback, source precedence, duplicate diagnostics, and read-only CR RBAC to `vllm-proxy`.
+- [x] Verify the CR-first catalog, Gemma overlay, proxy readiness, and cache hot path after accepting the legacy proxy's intentional Gemma activation.
+- [x] Compare the valid ConfigMap and CR-first catalogs: four models and the Gemma overlay match exactly in identity, ordered args, and defaults. Explicitly exclude invalid Fable/vanilla entries and retain ConfigMaps as rollback.
 
 ### TODO — controlled cutover
 
