@@ -88,7 +88,10 @@ func (r *LLMBackendReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		}
 	}
 
-	// Health check
+	// Health check. A Deployment can report Available before its Service endpoint
+	// accepts connections; retry transient probe failures so status converges
+	// without waiting for another Deployment event.
+	retryHealth := false
 	if r.HTTPClient != nil && backend.Status.AvailableReplicas > 0 {
 		driver, driverErr := runtimebackend.DefaultRegistry().Driver(backend.Spec.Type)
 		if driverErr != nil {
@@ -107,6 +110,7 @@ func (r *LLMBackendReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		} else {
 			setBackendCondition(&backend.Status, BackendHealthyCondition, metav1.ConditionFalse, "Unhealthy", err.Error())
 			backend.Status.Phase = cogitodevv1alpha1.BackendPhaseStarting
+			retryHealth = true
 		}
 	} else if backend.Status.AvailableReplicas == 0 {
 		setBackendCondition(&backend.Status, BackendHealthyCondition, metav1.ConditionFalse, "NoReplicas", "No available replicas")
@@ -120,6 +124,9 @@ func (r *LLMBackendReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
+	if retryHealth {
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
 	return ctrl.Result{}, nil
 }
 

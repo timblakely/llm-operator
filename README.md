@@ -20,6 +20,7 @@ legacy model and overlay ConfigMaps have been retired.
 | ✅ Complete | Milestone 4 — migration and proxy dual read | The non-production comparison passed for four valid models and the Gemma overlay; its temporary dual-read migration path is retired. |
 | ✅ Complete | Milestone 5 — controlled cutover | Accepted for the non-production cluster: the standalone cache-manager is in use, the proxy is read-only, and the operator completed a stable Gemma activation. |
 | ✅ Complete | Milestone 6 — hardening and ConfigMap retirement | CR-only catalog, legacy ConfigMap cleanup, CR-safe runtime observations, admission handlers, ownership rules, monitoring assets, and runbooks are deployed and verified. |
+| ✅ Complete | Milestone 7 — llama.cpp backend validation | Cogito completed an operator-owned transition from vLLM Gemma to cache-hot Laguna; the CR-only proxy served a successful llama.cpp completion and backend health converged to `Serving`. |
 
 Transitions remain opt-in. Do not apply sample CRs directly to a live cluster;
 use reviewed Flux resources and the operational guidance in
@@ -201,9 +202,9 @@ existing proxy-managed installation. Enable them only after migration by passing
 - [ ] Exercise and document a repeatable rollback path before production use.
 - [ ] Wire the opt-in admission webhook into a TLS/certificate-managed cluster
   deployment and validate an admission rejection end-to-end.
-- [ ] Add a live CR-backed llama.cpp serving path in Cogito, starting from the
-  registered but currently stopped Laguna backend; validate discovery, health,
-  cache behavior, and an operator-owned transition.
+- [x] Add and validate a live CR-backed llama.cpp serving path in Cogito:
+  Laguna's artifacts were hot, the operator transition completed, the proxy
+  served a completion, and the backend reported `Serving`.
 - [ ] Add and validate additional production backend instances, such as SGLang,
   through the same CRD and GitOps workflow.
 

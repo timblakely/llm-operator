@@ -211,9 +211,30 @@ and proxy fallback logic are retired, CR-safe runtime/model-card metadata is
 persisted, and operations plus monitored transition/cache signals are
 documented.
 
+## Milestone 7 — llama.cpp Backend Validation
+
+**Goal:** prove that a CR-backed llama.cpp workload follows the same
+operator-owned lifecycle as the vLLM path.
+
+1. **Complete:** audit the registered Laguna backend, its bound RWO PVC,
+   two-GPU placement, and required GGUF artifacts; both artifacts were already
+   hot in cache.
+2. **Complete:** change `LLMActiveModel/default` from canonical Gemma to
+   `poolside/Laguna-S-2.1` through Cogito GitOps. The operator scaled vLLM
+   down, ensured the cache, configured Laguna, and completed the transition in
+   about 40 seconds.
+3. **Complete:** verify the CR-only proxy catalog and a minimal completion
+   through it. `LLMBackend/laguna` reports `Serving`, `BackendHealthy=True`,
+   and `ModelLoaded=True`.
+4. **Complete:** release a controller retry for a transient first Service health
+   probe so backend status converges after runtime startup.
+
+**Exit criteria:** met. Laguna is the active, healthy llama.cpp backend in
+Cogito; the vLLM deployment is scaled to zero.
+
 ## Recommended Execution Order
 
-`M0 → M1 → M2 → M3 → M4 → M5 → M6`
+`M0 → M1 → M2 → M3 → M4 → M5 → M6 → M7`
 
 M0–M2 are local development gates. M3 requires the operator chart and Cogito
 Flux resources before safe cluster observation. M4–M6 require coordination with
