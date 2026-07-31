@@ -232,9 +232,28 @@ operator-owned lifecycle as the vLLM path.
 **Exit criteria:** met. Laguna is the active, healthy llama.cpp backend in
 Cogito; the vLLM deployment is scaled to zero.
 
+## Milestone 8 — API Model-Selection Handoff
+
+**Goal:** preserve model selection through the API proxy without restoring its
+legacy Deployment mutation authority.
+
+1. **Complete:** replace the read-only proxy's disabled-transition response for
+   a non-active model with a narrowly scoped patch to
+   `LLMActiveModel/default`.
+2. **Complete:** retain proxy read-only access to Deployments; grant only
+   `get`/`patch` on that one ActiveModel resource. Flux creates the singleton
+   but does not reset runtime model choices.
+3. **Complete:** validate API model selection for Qwen and Gemma. The proxy
+   requests the ActiveModel change, waits for the operator's Stable status, and
+   returns the original completion with HTTP 200. The operator stopped Laguna,
+   started vLLM, and Gemma is the current Stable/Serving model.
+
+**Exit criteria:** met. API model selection requests the operator transition;
+the operator remains the sole workload mutator.
+
 ## Recommended Execution Order
 
-`M0 → M1 → M2 → M3 → M4 → M5 → M6 → M7`
+`M0 → M1 → M2 → M3 → M4 → M5 → M6 → M7 → M8`
 
 M0–M2 are local development gates. M3 requires the operator chart and Cogito
 Flux resources before safe cluster observation. M4–M6 require coordination with
