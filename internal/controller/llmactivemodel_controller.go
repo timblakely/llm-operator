@@ -50,6 +50,10 @@ import (
 const (
 	activeModelAnno          = "llm.cogito.dev/active-model"
 	switchedAtAnno           = "llm.cogito.dev/switched-at"
+	chatTemplateAnno         = "llm.cogito.dev/chat-template-sha256"
+	chatTemplateVolumeName   = "llm-chat-template"
+	chatTemplateMountDir     = "/etc/llm-templates"
+	chatTemplateMountFile    = "chat-template.jinja"
 	backendProbeWait         = 2 * time.Second
 	defaultTransitionTimeout = 30 * time.Minute
 	errTransitionCancelled   = "transition cancelled"
@@ -112,12 +116,6 @@ func (r *LLMActiveModelReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
-	// If already stable with the same model, no-op
-	if activeModel.Status.Phase == cogitodevv1alpha1.ActiveModelPhaseStable &&
-		activeModel.Status.ModelName == activeModel.Spec.ModelName {
-		return ctrl.Result{}, nil
-	}
-
 	// Look up target model
 	model, err := r.findModel(ctx, activeModel.Namespace, activeModel.Spec.ModelName)
 	if err != nil {
@@ -138,17 +136,26 @@ func (r *LLMActiveModelReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
-	// If already serving the target model on the target backend, mark stable
+	// A stable model can still need a rolling update when its desired runtime
+	// contract changes (for example, a pinned chat template is added or changed).
 	if activeModel.Status.ModelName == activeModel.Spec.ModelName &&
 		activeModel.Status.BackendType == model.Spec.Serving.Backend {
-		activeModel.Status.Phase = cogitodevv1alpha1.ActiveModelPhaseStable
-		activeModel.Status.BackendType = model.Spec.Serving.Backend
-		setActiveCondition(&activeModel.Status, ModelActiveCondition, metav1.ConditionTrue, "Active", "Model is active")
-		setActiveCondition(&activeModel.Status, TransitionCompleteCond, metav1.ConditionTrue, "Complete", "Transition complete")
-		if err := r.Status().Update(ctx, &activeModel); err != nil {
+		matches, err := r.deploymentMatchesModel(ctx, &activeModel, model, backend)
+		if err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, nil
+		if matches {
+			if activeModel.Status.Phase != cogitodevv1alpha1.ActiveModelPhaseStable {
+				activeModel.Status.Phase = cogitodevv1alpha1.ActiveModelPhaseStable
+				activeModel.Status.BackendType = model.Spec.Serving.Backend
+				setActiveCondition(&activeModel.Status, ModelActiveCondition, metav1.ConditionTrue, "Active", "Model is active")
+				setActiveCondition(&activeModel.Status, TransitionCompleteCond, metav1.ConditionTrue, "Complete", "Transition complete")
+				if err := r.Status().Update(ctx, &activeModel); err != nil {
+					return ctrl.Result{}, err
+				}
+			}
+			return ctrl.Result{}, nil
+		}
 	}
 
 	if !r.TransitionsEnabled {
@@ -271,6 +278,9 @@ func (r *LLMActiveModelReconciler) executeTransition(ctx context.Context, active
 	}
 	if err := driver.Validate(model); err != nil {
 		return r.failTransition(ctx, activeModel, model.Spec.Model.Name, "InvalidServingConfiguration", "invalid_serving_configuration", err)
+	}
+	if err := validateChatTemplate(ctx, r.Client, model); err != nil {
+		return r.failTransition(ctx, activeModel, model.Spec.Model.Name, "TemplateInvalid", "template_invalid", err)
 	}
 
 	previousBackendType := activeModel.Status.BackendType
@@ -511,12 +521,27 @@ func (r *LLMActiveModelReconciler) activateDeployment(ctx context.Context, activ
 			desiredArgs := effectiveArgs(model)
 			argsChanged := !reflect.DeepEqual(deployment.Spec.Template.Spec.Containers[i].Args, desiredArgs)
 			activeChanged := deployment.Spec.Template.Annotations == nil || deployment.Spec.Template.Annotations[activeModelAnno] != model.Spec.Model.Name
-			if argsChanged || activeChanged {
+			templateChanged := applyChatTemplate(&deployment.Spec.Template.Spec, &deployment.Spec.Template.Spec.Containers[i], model.Spec.Serving.ChatTemplate)
+			desiredTemplateDigest := ""
+			if model.Spec.Serving.ChatTemplate != nil {
+				desiredTemplateDigest = model.Spec.Serving.ChatTemplate.SHA256
+			}
+			currentTemplateDigest := ""
+			if deployment.Spec.Template.Annotations != nil {
+				currentTemplateDigest = deployment.Spec.Template.Annotations[chatTemplateAnno]
+			}
+			templateAnnotationChanged := currentTemplateDigest != desiredTemplateDigest
+			if argsChanged || activeChanged || templateChanged || templateAnnotationChanged {
 				if deployment.Spec.Template.Annotations == nil {
 					deployment.Spec.Template.Annotations = make(map[string]string)
 				}
 				deployment.Spec.Template.Annotations[activeModelAnno] = model.Spec.Model.Name
 				deployment.Spec.Template.Annotations[switchedAtAnno] = time.Now().UTC().Format(time.RFC3339Nano)
+				if desiredTemplateDigest == "" {
+					delete(deployment.Spec.Template.Annotations, chatTemplateAnno)
+				} else {
+					deployment.Spec.Template.Annotations[chatTemplateAnno] = desiredTemplateDigest
+				}
 				deployment.Spec.Template.Spec.Containers[i].Args = desiredArgs
 			}
 			if reflect.DeepEqual(base.Spec, deployment.Spec) {
@@ -526,6 +551,72 @@ func (r *LLMActiveModelReconciler) activateDeployment(ctx context.Context, activ
 		}
 	}
 	return fmt.Errorf("container %q not found in deployment %q", backend.Spec.ContainerName, deployment.Name)
+}
+
+func (r *LLMActiveModelReconciler) deploymentMatchesModel(ctx context.Context, activeModel *cogitodevv1alpha1.LLMActiveModel, model *cogitodevv1alpha1.LLMModel, backend *cogitodevv1alpha1.LLMBackend) (bool, error) {
+	var deployment appsv1.Deployment
+	if err := r.Get(ctx, types.NamespacedName{Name: backend.Spec.DeploymentRef.Name, Namespace: activeModel.Namespace}, &deployment); err != nil {
+		return false, fmt.Errorf("get deployment: %w", err)
+	}
+	for i := range deployment.Spec.Template.Spec.Containers {
+		container := &deployment.Spec.Template.Spec.Containers[i]
+		if container.Name != backend.Spec.ContainerName {
+			continue
+		}
+		if !reflect.DeepEqual(container.Args, effectiveArgs(model)) || deployment.Spec.Template.Annotations[activeModelAnno] != model.Spec.Model.Name {
+			return false, nil
+		}
+		expected := deployment.DeepCopy()
+		applyChatTemplate(&expected.Spec.Template.Spec, &expected.Spec.Template.Spec.Containers[i], model.Spec.Serving.ChatTemplate)
+		if !reflect.DeepEqual(expected.Spec.Template.Spec.Volumes, deployment.Spec.Template.Spec.Volumes) ||
+			!reflect.DeepEqual(expected.Spec.Template.Spec.Containers[i].VolumeMounts, container.VolumeMounts) {
+			return false, nil
+		}
+		wantDigest := ""
+		if model.Spec.Serving.ChatTemplate != nil {
+			wantDigest = model.Spec.Serving.ChatTemplate.SHA256
+		}
+		return deployment.Spec.Template.Annotations[chatTemplateAnno] == wantDigest, nil
+	}
+	return false, fmt.Errorf("container %q not found in deployment %q", backend.Spec.ContainerName, deployment.Name)
+}
+
+// applyChatTemplate owns one reserved volume/mount pair on the runtime
+// container. It returns whether it changed the Pod spec.
+func applyChatTemplate(podSpec *corev1.PodSpec, container *corev1.Container, template *cogitodevv1alpha1.ChatTemplateSpec) bool {
+	beforeVolumes := append([]corev1.Volume(nil), podSpec.Volumes...)
+	beforeMounts := append([]corev1.VolumeMount(nil), container.VolumeMounts...)
+
+	volumes := podSpec.Volumes[:0]
+	for _, volume := range podSpec.Volumes {
+		if volume.Name != chatTemplateVolumeName {
+			volumes = append(volumes, volume)
+		}
+	}
+	podSpec.Volumes = volumes
+	mounts := container.VolumeMounts[:0]
+	for _, mount := range container.VolumeMounts {
+		if mount.Name != chatTemplateVolumeName {
+			mounts = append(mounts, mount)
+		}
+	}
+	container.VolumeMounts = mounts
+
+	if template != nil {
+		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
+			Name: chatTemplateVolumeName,
+			VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: template.ConfigMapKeyRef.Name},
+				Items:                []corev1.KeyToPath{{Key: template.ConfigMapKeyRef.Key, Path: chatTemplateMountFile}},
+			}},
+		})
+		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+			Name:      chatTemplateVolumeName,
+			MountPath: chatTemplateMountDir,
+			ReadOnly:  true,
+		})
+	}
+	return !reflect.DeepEqual(beforeVolumes, podSpec.Volumes) || !reflect.DeepEqual(beforeMounts, container.VolumeMounts)
 }
 
 func (r *LLMActiveModelReconciler) scaleDeployment(ctx context.Context, name, namespace string, replicas int32) error {

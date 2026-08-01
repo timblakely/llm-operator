@@ -22,7 +22,7 @@ legacy model and overlay ConfigMaps have been retired.
 | ✅ Complete | Milestone 6 — hardening and ConfigMap retirement | CR-only catalog, legacy ConfigMap cleanup, CR-safe runtime observations, admission handlers, ownership rules, monitoring assets, and runbooks are deployed and verified. |
 | ✅ Complete | Milestone 7 — llama.cpp backend validation | Cogito completed an operator-owned transition from vLLM Gemma to cache-hot Laguna; the CR-only proxy served a successful llama.cpp completion and backend health converged to `Serving`. |
 | ✅ Complete | Milestone 8 — proxy-to-operator model handoff | A request for a non-active model now updates `LLMActiveModel/default`, waits for the operator transition, and serves the original request without regaining Deployment mutation permission. |
-| 📋 Planned | Milestone 9 — managed serving templates | Introduce a reviewed, digest-pinned server-side template reference on `LLMModel`; do not implement or deploy it until the M9 plan is approved. |
+| 🚧 In progress | Milestone 9 — managed serving templates | The operator API, validation, reconciliation, and backend translations are under implementation; Qwen GitOps validation remains pending. |
 
 Transitions remain opt-in. Do not apply sample CRs directly to a live cluster;
 use reviewed Flux resources and the operational guidance in

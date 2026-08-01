@@ -2,8 +2,9 @@
 
 ## Status
 
-**Planned — documentation and design only.** No API, controller, chart, or
-Cogito workload change is authorized by this plan alone.
+**In progress.** The operator contract, validation, and workload-reconciliation
+work are being implemented. Cogito Qwen resources must not be reconciled until
+the matching operator image and chart are published and reviewed.
 
 ## Objective
 
@@ -70,6 +71,10 @@ references are deliberately out of scope.
 4. Decide the exact behavior for a missing key, unreadable ConfigMap, digest
    mismatch, and a backend that does not support templates.
 
+**Status:** complete. The reviewed contract uses a same-namespace ConfigMap key
+and SHA-256 digest; the controller owns one reserved volume/mount/annotation
+pair and cleans it up when no template is selected.
+
 **Exit:** reviewed API and ownership contract; no runtime behavior changed.
 
 ### M9.1 — Operator API, validation, and reconciliation
@@ -83,6 +88,10 @@ references are deliberately out of scope.
    failed update.
 4. Add unit/envtest coverage for absent, valid, missing, changed, and
    mismatched templates.
+
+**Status:** in progress. API, generated CRD/RBAC, digest resolution, targeted
+ConfigMap watches, conditions, and unit coverage are implemented; the chart
+release and cluster validation remain pending.
 
 **Exit:** a valid template reference is observable and invalid references fail
 predictably without mutating a running backend.
@@ -98,6 +107,11 @@ predictably without mutating a running backend.
    verified; otherwise reject it explicitly.
 5. Add render and fake-client transition tests proving no duplicate flags,
    stable volume names, removal on model change, and sidecar preservation.
+
+**Status:** in progress. vLLM and llama.cpp argument/mount generation plus
+Deployment cleanup are implemented and unit-tested. The deployed llama.cpp
+flag verification and integration validation remain pending; SGLang is still
+explicitly unsupported for templates.
 
 **Exit:** drivers produce deterministic, backend-correct Pod mutations with
 complete cleanup.

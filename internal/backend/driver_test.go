@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
+
 	cogitodevv1alpha1 "github.com/timblakely/llm-operator/api/cogito.dev/v1alpha1"
 )
 
@@ -42,6 +44,46 @@ func TestDriversBuildRuntimeSpecificArgs(t *testing.T) {
 			}
 			if got := driver.EffectiveArgs(model); !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("EffectiveArgs() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDriversBuildChatTemplateArgsAndRejectUnsupportedBackend(t *testing.T) {
+	t.Parallel()
+
+	model := &cogitodevv1alpha1.LLMModel{Spec: cogitodevv1alpha1.LLMModelSpec{
+		Model: cogitodevv1alpha1.LLMModelRef{Name: "acme/model", Source: "acme/model"},
+		Serving: cogitodevv1alpha1.ServingSpec{ChatTemplate: &cogitodevv1alpha1.ChatTemplateSpec{
+			ConfigMapKeyRef: corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "template"}, Key: "chat_template.jinja"},
+			SHA256:          strings.Repeat("a", 64),
+		}},
+	}}
+
+	tests := []struct {
+		backend cogitodevv1alpha1.BackendType
+		want    []string
+		wantErr bool
+	}{
+		{backend: cogitodevv1alpha1.BackendVLLM, want: []string{"--chat-template", chatTemplateMountPath}},
+		{backend: cogitodevv1alpha1.BackendLlamaCpp, want: []string{"--jinja", "--chat-template-file", chatTemplateMountPath}},
+		{backend: cogitodevv1alpha1.BackendSGLang, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.backend), func(t *testing.T) {
+			model.Spec.Serving.Backend = tt.backend
+			driver, err := DefaultRegistry().Driver(tt.backend)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := driver.Validate(model); (err != nil) != tt.wantErr {
+				t.Fatalf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if !tt.wantErr {
+				got := driver.EffectiveArgs(model)
+				if !reflect.DeepEqual(got[len(got)-len(tt.want):], tt.want) {
+					t.Fatalf("template args = %q, want suffix %q", got, tt.want)
+				}
 			}
 		})
 	}

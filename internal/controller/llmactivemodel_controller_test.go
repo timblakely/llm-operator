@@ -120,10 +120,65 @@ func TestActivateDeploymentIsIdempotentAfterActivation(t *testing.T) {
 	}
 }
 
+func TestActivateDeploymentMountsAndRemovesChatTemplate(t *testing.T) {
+	t.Parallel()
+
+	scheme := testScheme(t)
+	deployment := testDeployment()
+	model := testModel()
+	model.Spec.Serving.ChatTemplate = &cogitodevv1alpha1.ChatTemplateSpec{
+		ConfigMapKeyRef: corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "qwen-template"}, Key: "chat_template.jinja"},
+		SHA256:          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}
+	backend := testBackend()
+	active := &cogitodevv1alpha1.LLMActiveModel{ObjectMeta: metav1.ObjectMeta{Name: "active", Namespace: "llm"}}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(deployment).Build()
+	reconciler := &LLMActiveModelReconciler{Client: client, Scheme: scheme}
+
+	if err := reconciler.activateDeployment(context.Background(), active, model, backend); err != nil {
+		t.Fatal(err)
+	}
+	var mounted appsv1.Deployment
+	if err := client.Get(context.Background(), types.NamespacedName{Name: deployment.Name, Namespace: deployment.Namespace}, &mounted); err != nil {
+		t.Fatal(err)
+	}
+	container := mounted.Spec.Template.Spec.Containers[0]
+	if got := container.Args[len(container.Args)-2:]; len(container.Args) < 2 || got[0] != "--chat-template" || got[1] != chatTemplateMountDir+"/"+chatTemplateMountFile {
+		t.Fatalf("template args = %q", container.Args)
+	}
+	if len(mounted.Spec.Template.Spec.Volumes) != 1 || mounted.Spec.Template.Spec.Volumes[0].ConfigMap == nil || mounted.Spec.Template.Spec.Volumes[0].ConfigMap.Name != "qwen-template" {
+		t.Fatalf("template volume = %#v", mounted.Spec.Template.Spec.Volumes)
+	}
+	if len(container.VolumeMounts) != 1 || container.VolumeMounts[0].Name != chatTemplateVolumeName || !container.VolumeMounts[0].ReadOnly {
+		t.Fatalf("template mounts = %#v", container.VolumeMounts)
+	}
+	if got := mounted.Spec.Template.Annotations[chatTemplateAnno]; got != model.Spec.Serving.ChatTemplate.SHA256 {
+		t.Fatalf("template annotation = %q", got)
+	}
+
+	model.Spec.Serving.ChatTemplate = nil
+	if err := reconciler.activateDeployment(context.Background(), active, model, backend); err != nil {
+		t.Fatal(err)
+	}
+	var cleaned appsv1.Deployment
+	if err := client.Get(context.Background(), types.NamespacedName{Name: deployment.Name, Namespace: deployment.Namespace}, &cleaned); err != nil {
+		t.Fatal(err)
+	}
+	if len(cleaned.Spec.Template.Spec.Volumes) != 0 || len(cleaned.Spec.Template.Spec.Containers[0].VolumeMounts) != 0 {
+		t.Fatalf("template resources were not removed: volumes=%#v mounts=%#v", cleaned.Spec.Template.Spec.Volumes, cleaned.Spec.Template.Spec.Containers[0].VolumeMounts)
+	}
+	if _, found := cleaned.Spec.Template.Annotations[chatTemplateAnno]; found {
+		t.Fatalf("template annotation was not removed: %#v", cleaned.Spec.Template.Annotations)
+	}
+}
+
 func testScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	if err := cogitodevv1alpha1.AddToScheme(scheme); err != nil {

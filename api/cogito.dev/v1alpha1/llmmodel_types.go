@@ -116,11 +116,41 @@ type ServingSpec struct {
 	// backend driver translates it to the runtime's native configuration.
 	ReasoningParser string `json:"reasoningParser,omitempty"`
 
+	// ChatTemplate selects a reviewed server-side chat template for this model.
+	// The referenced ConfigMap must be in the same namespace as the LLMModel
+	// and its selected key must match the pinned SHA-256 digest. When omitted,
+	// the runtime's model-provided template is used.
+	ChatTemplate *ChatTemplateSpec `json:"chatTemplate,omitempty"`
+
 	// Args are backend-specific CLI arguments. Model name, revision, and served-model-name
 	// are injected by the controller and must NOT be included here. Existing raw parser
 	// flags remain supported for backwards compatibility; do not mix them with the
 	// corresponding structured parser field.
 	Args []string `json:"args"`
+}
+
+// ChatTemplateSpec identifies immutable, GitOps-managed server-side template
+// content. Template bytes are deliberately not embedded in a CR so ordinary
+// Kubernetes ConfigMap lifecycle, review, and size limits apply.
+// +kubebuilder:object:generate=true
+type ChatTemplateSpec struct {
+	// ConfigMapKeyRef selects the same-namespace ConfigMap key containing the
+	// UTF-8 Jinja template.
+	ConfigMapKeyRef corev1.ConfigMapKeySelector `json:"configMapKeyRef"`
+
+	// SHA256 is the lowercase hexadecimal SHA-256 digest of the selected
+	// ConfigMap value. It prevents a mutable ConfigMap update from silently
+	// changing an active model's prompt contract.
+	// +kubebuilder:validation:Pattern=`^[a-f0-9]{64}$`
+	SHA256 string `json:"sha256"`
+}
+
+// ResolvedChatTemplate identifies the template observed by the runtime.
+// +kubebuilder:object:generate=true
+type ResolvedChatTemplate struct {
+	ConfigMapName string `json:"configMapName"`
+	Key           string `json:"key"`
+	SHA256        string `json:"sha256"`
 }
 
 // CacheState describes the artifact availability.
@@ -136,12 +166,13 @@ type CacheState struct {
 // RuntimeMetadata captures observed runtime properties after successful startup.
 // +kubebuilder:object:generate=true
 type RuntimeMetadata struct {
-	ObservedAt        metav1.Time       `json:"observedAt"`
-	ServedModelIDs    []string          `json:"servedModelIDs,omitempty"`
-	ContextLength     int               `json:"contextLength"`
-	MaxConcurrentReqs int               `json:"maxConcurrentRequests,omitempty"`
-	LaunchArguments   map[string]string `json:"launchArguments,omitempty"`
-	KVCache           map[string]string `json:"kvCache,omitempty"`
+	ObservedAt        metav1.Time           `json:"observedAt"`
+	ServedModelIDs    []string              `json:"servedModelIDs,omitempty"`
+	ContextLength     int                   `json:"contextLength"`
+	MaxConcurrentReqs int                   `json:"maxConcurrentRequests,omitempty"`
+	LaunchArguments   map[string]string     `json:"launchArguments,omitempty"`
+	KVCache           map[string]string     `json:"kvCache,omitempty"`
+	ChatTemplate      *ResolvedChatTemplate `json:"chatTemplate,omitempty"`
 }
 
 // LLMModelStatus defines the observed state of LLMModel.

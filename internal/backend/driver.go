@@ -36,6 +36,7 @@ type Capabilities struct {
 	OpenAIModelDiscovery bool
 	ToolCallParser       bool
 	ReasoningParser      bool
+	ChatTemplate         bool
 	Metrics              bool
 	CacheFormat          CacheFormat
 	HealthPath           string
@@ -92,6 +93,7 @@ type runtimeDriver struct {
 	injectedFlags       []string
 	toolCallFlag        string
 	reasoningFlag       string
+	chatTemplateFlags   []string
 	maxConcurrencyFlags []string
 	build               func(*cogitodevv1alpha1.LLMModel, []string) []string
 	parseMetrics        func(string) map[string]string
@@ -134,6 +136,16 @@ func (d runtimeDriver) Validate(model *cogitodevv1alpha1.LLMModel) error {
 			return fmt.Errorf("reasoningParser cannot be used with raw %q args", d.reasoningFlag)
 		}
 	}
+	if model.Spec.Serving.ChatTemplate != nil {
+		if !d.capabilities.ChatTemplate {
+			return fmt.Errorf("backend %q does not support chatTemplate", d.kind)
+		}
+		for _, flag := range d.chatTemplateFlags {
+			if containsFlag(model.Spec.Serving.Args, flag) {
+				return fmt.Errorf("chatTemplate cannot be used with raw %q args", flag)
+			}
+		}
+	}
 	if model.Spec.Artifact != nil {
 		if model.Spec.Artifact.ExpectedSize != "" {
 			if _, err := parseSize(model.Spec.Artifact.ExpectedSize); err != nil {
@@ -161,7 +173,23 @@ func (d runtimeDriver) EffectiveArgs(model *cogitodevv1alpha1.LLMModel) []string
 	if model.Spec.Serving.ReasoningParser != "" && d.reasoningFlag != "" {
 		args = append(args, d.reasoningFlag, model.Spec.Serving.ReasoningParser)
 	}
+	if model.Spec.Serving.ChatTemplate != nil {
+		args = append(args, d.chatTemplateArgs()...)
+	}
 	return args
+}
+
+const chatTemplateMountPath = "/etc/llm-templates/chat-template.jinja"
+
+func (d runtimeDriver) chatTemplateArgs() []string {
+	switch d.kind {
+	case cogitodevv1alpha1.BackendVLLM:
+		return []string{"--chat-template", chatTemplateMountPath}
+	case cogitodevv1alpha1.BackendLlamaCpp:
+		return []string{"--jinja", "--chat-template-file", chatTemplateMountPath}
+	default:
+		return nil
+	}
 }
 
 func (d runtimeDriver) CheckHealth(ctx context.Context, httpClient HTTPDoer, baseURL string) error {
@@ -202,6 +230,13 @@ func (d runtimeDriver) CollectRuntimeMetadata(ctx context.Context, httpClient HT
 		ObservedAt:      metav1.Now(),
 		ContextLength:   model.Spec.Serving.MaxModelLen,
 		LaunchArguments: launchArguments(d.EffectiveArgs(model)),
+	}
+	if template := model.Spec.Serving.ChatTemplate; template != nil {
+		meta.ChatTemplate = &cogitodevv1alpha1.ResolvedChatTemplate{
+			ConfigMapName: template.ConfigMapKeyRef.Name,
+			Key:           template.ConfigMapKeyRef.Key,
+			SHA256:        template.SHA256,
+		}
 	}
 
 	var collectionErrors []error
@@ -400,6 +435,7 @@ var vllmDriver = runtimeDriver{
 		OpenAIModelDiscovery: true,
 		ToolCallParser:       true,
 		ReasoningParser:      true,
+		ChatTemplate:         true,
 		Metrics:              true,
 		CacheFormat:          CacheFormatHuggingFace,
 		HealthPath:           "/health",
@@ -407,6 +443,7 @@ var vllmDriver = runtimeDriver{
 	injectedFlags:       []string{"--model", "--revision", "--served-model-name"},
 	toolCallFlag:        "--tool-call-parser",
 	reasoningFlag:       "--reasoning-parser",
+	chatTemplateFlags:   []string{"--chat-template"},
 	maxConcurrencyFlags: []string{"--max-num-seqs"},
 	build: func(model *cogitodevv1alpha1.LLMModel, args []string) []string {
 		args = append(args, "--model", model.Spec.Model.Source)
@@ -423,10 +460,12 @@ var llamaCPPDriver = runtimeDriver{
 	capabilities: Capabilities{
 		OpenAIModelDiscovery: true,
 		Metrics:              true,
+		ChatTemplate:         true,
 		CacheFormat:          CacheFormatGGUF,
 		HealthPath:           "/health",
 	},
 	injectedFlags:       []string{"-m", "--model", "--alias"},
+	chatTemplateFlags:   []string{"--chat-template-file", "--jinja"},
 	maxConcurrencyFlags: []string{"--parallel", "-np"},
 	build: func(model *cogitodevv1alpha1.LLMModel, args []string) []string {
 		return append(args, "-m", model.Spec.Model.Source, "--alias", model.Spec.Model.Name)

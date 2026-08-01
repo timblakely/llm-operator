@@ -142,6 +142,49 @@ spec:
                     description: 'Backend is the serving runtime: "vllm", "sglang",
                       or "llama-cpp".'
                     type: string
+                  chatTemplate:
+                    description: |-
+                      ChatTemplate selects a reviewed server-side chat template for this model.
+                      The referenced ConfigMap must be in the same namespace as the LLMModel
+                      and its selected key must match the pinned SHA-256 digest. When omitted,
+                      the runtime's model-provided template is used.
+                    properties:
+                      configMapKeyRef:
+                        description: |-
+                          ConfigMapKeyRef selects the same-namespace ConfigMap key containing the
+                          UTF-8 Jinja template.
+                        properties:
+                          key:
+                            description: The key to select.
+                            type: string
+                          name:
+                            default: ""
+                            description: |-
+                              Name of the referent.
+                              This field is effectively required, but due to backwards compatibility is
+                              allowed to be empty. Instances of this type with an empty value here are
+                              almost certainly wrong.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                          optional:
+                            description: Specify whether the ConfigMap or its key
+                              must be defined
+                            type: boolean
+                        required:
+                        - key
+                        type: object
+                        x-kubernetes-map-type: atomic
+                      sha256:
+                        description: |-
+                          SHA256 is the lowercase hexadecimal SHA-256 digest of the selected
+                          ConfigMap value. It prevents a mutable ConfigMap update from silently
+                          changing an active model's prompt contract.
+                        pattern: ^[a-f0-9]{64}$
+                        type: string
+                    required:
+                    - configMapKeyRef
+                    - sha256
+                    type: object
                   displayName:
                     description: DisplayName is a human-readable label.
                     type: string
@@ -273,6 +316,21 @@ spec:
                 description: RuntimeMetadata captures observed runtime properties
                   after successful startup.
                 properties:
+                  chatTemplate:
+                    description: ResolvedChatTemplate identifies the template observed
+                      by the runtime.
+                    properties:
+                      configMapName:
+                        type: string
+                      key:
+                        type: string
+                      sha256:
+                        type: string
+                    required:
+                    - configMapName
+                    - key
+                    - sha256
+                    type: object
                   contextLength:
                     type: integer
                   kvCache:
