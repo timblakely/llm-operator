@@ -13,8 +13,9 @@ oci://ghcr.io/timblakely/charts/llm-operator
 
 The image is digest-only. `image.digest` has no deployable default and must be
 set to a reviewed `sha256:` digest. Model transitions default to disabled.
-The manager currently watches CRs and referenced workloads cluster-wide, so the
-chart uses a ClusterRoleBinding and should be installed only once per cluster.
+The manager currently watches CRs, referenced ConfigMaps, and workloads
+cluster-wide, so the chart uses a ClusterRoleBinding and should be installed
+only once per cluster.
 
 ## Validate and package
 
