@@ -1,10 +1,10 @@
 # Implementation Plan
 
-> Historical architecture and task decomposition. The current execution
-> record is `remaining_work.md`: M0–M6 are complete in Cogito, including the
-> CR-only proxy and legacy ConfigMap retirement. Remaining work is limited to
-> runtime/container integration coverage and a repeatable production rollback
-> exercise.
+> Historical architecture and task decomposition. M0–M8 are complete in
+> Cogito's non-production cluster, including the CR-only proxy and legacy
+> ConfigMap retirement. The active feature plan is
+> [template_management.md](template_management.md); `remaining_work.md` is the
+> historical migration record and retains eventual production-readiness TODOs.
 
 ## Goal
 
@@ -22,7 +22,7 @@ The chart must default to observation mode with transitions disabled. Use Flux
 CRD `CreateReplace` policy for controlled CRD upgrades, and publish immutable
 chart and image artifacts before cluster validation.
 
-The current, ordered implementation plan is [remaining_work.md](remaining_work.md).
+The current implementation plan is [template_management.md](template_management.md).
 
 ---
 

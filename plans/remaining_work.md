@@ -1,4 +1,11 @@
-# Remaining Work Plan
+# Historical Migration Plan (M0–M8 complete)
+
+> **Superseded as an execution checklist on 2026-07-31.** M0–M8 completed in
+> Cogito's non-production cluster. This document is retained as the migration
+> record and for its eventual production-readiness TODOs. The active feature
+> plan is [template_management.md](template_management.md), beginning with M9
+> managed serving templates. Do not act on the in-progress labels below; they
+> describe historical rollout stages.
 
 ## Objective
 

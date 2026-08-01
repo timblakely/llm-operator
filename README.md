@@ -22,6 +22,7 @@ legacy model and overlay ConfigMaps have been retired.
 | ✅ Complete | Milestone 6 — hardening and ConfigMap retirement | CR-only catalog, legacy ConfigMap cleanup, CR-safe runtime observations, admission handlers, ownership rules, monitoring assets, and runbooks are deployed and verified. |
 | ✅ Complete | Milestone 7 — llama.cpp backend validation | Cogito completed an operator-owned transition from vLLM Gemma to cache-hot Laguna; the CR-only proxy served a successful llama.cpp completion and backend health converged to `Serving`. |
 | ✅ Complete | Milestone 8 — proxy-to-operator model handoff | A request for a non-active model now updates `LLMActiveModel/default`, waits for the operator transition, and serves the original request without regaining Deployment mutation permission. |
+| 📋 Planned | Milestone 9 — managed serving templates | Introduce a reviewed, digest-pinned server-side template reference on `LLMModel`; do not implement or deploy it until the M9 plan is approved. |
 
 Transitions remain opt-in. Do not apply sample CRs directly to a live cluster;
 use reviewed Flux resources and the operational guidance in
@@ -160,7 +161,12 @@ Model transitions are disabled by default so the operator can safely observe an
 existing proxy-managed installation. Enable them only after migration by passing
 `--enable-transitions=true` to the manager.
 
-## TODO and Migration Plan
+## Status, TODO, and Active Plan
+
+M0–M8 are complete for Cogito's non-production cluster. The active next work
+is [M9 — managed serving templates](plans/template_management.md). The earlier
+migration documents in `plans/` are retained as historical decision and
+validation records; they are not execution checklists.
 
 ### Complete — observation-mode validation
 
@@ -209,7 +215,24 @@ existing proxy-managed installation. Enable them only after migration by passing
 - [ ] Add and validate additional production backend instances, such as SGLang,
   through the same CRD and GitOps workflow.
 
-The authoritative execution plan is [remaining_work.md](plans/remaining_work.md). [observation_validation.md](plans/observation_validation.md) records the current blocker, Flux deployment procedure, and rollback. [expand_operator.md](plans/expand_operator.md) is the earlier Phase 1.5 gap analysis; use it as historical context, not current status. [OPERATOR_PLAN.md](plans/OPERATOR_PLAN.md) contains the original long-range architecture and migration design.
+### Planned — managed serving templates (M9)
+
+- [ ] Add a portable, model-level `serving.chatTemplate` reference with a
+  same-namespace ConfigMap key and pinned content digest.
+- [ ] Teach the controller and backend drivers to validate, mount, inject, and
+  remove the selected server-side template without making request overlays own
+  runtime behavior.
+- [ ] Vendor and review the Qwen fixed template in Cogito, bind it to Qwen,
+  and validate the captured Pi tool-call request before treating it as a
+  general solution.
+- [ ] Consider a reusable `LLMServingProfile` resource only if several models
+  demonstrably need the same template/parser/reasoning bundle.
+
+The active plan is [template_management.md](plans/template_management.md).
+[remaining_work.md](plans/remaining_work.md),
+[observation_validation.md](plans/observation_validation.md),
+[expand_operator.md](plans/expand_operator.md), and
+[OPERATOR_PLAN.md](plans/OPERATOR_PLAN.md) are retained as historical context.
 
 ## Project Structure
 

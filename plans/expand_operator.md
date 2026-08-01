@@ -1,9 +1,11 @@
 # Operator Expansion Plan
 
-> Historical Phase 1.5 gap analysis. Several items below are now complete;
-> consult [remaining_work.md](remaining_work.md) for current execution status
-> and [observation_validation.md](observation_validation.md) for the Flux-based
-> observation deployment procedure.
+> Historical Phase 1.5 gap analysis. The migration work below is complete;
+> unchecked entries are not active tasks. Consult
+> [template_management.md](template_management.md) for current execution work,
+> [remaining_work.md](remaining_work.md) for the migration record, and
+> [observation_validation.md](observation_validation.md) for the Flux
+> validation record.
 
 ## Goal
 

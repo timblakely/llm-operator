@@ -3,8 +3,10 @@
 ## Status
 
 > Historical record: the passive-observation rollout passed on 2026-07-29.
-> M5 and M6 have since completed in Cogito; use `remaining_work.md` for the
-> current milestone state.
+> M5 and M6 have since completed in Cogito, followed by M7 and M8. This is a
+> validation record, not a current runbook; use
+> [template_management.md](template_management.md) for active work and
+> [remaining_work.md](remaining_work.md) for the historical migration record.
 
 The sustained window was explicitly waived for this non-production cluster on
 2026-07-29. That accepted M3 for planning purposes; later M5 enabled the
