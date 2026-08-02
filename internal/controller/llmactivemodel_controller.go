@@ -566,10 +566,7 @@ func (r *LLMActiveModelReconciler) deploymentMatchesModel(ctx context.Context, a
 		if !reflect.DeepEqual(container.Args, effectiveArgs(model)) || deployment.Spec.Template.Annotations[activeModelAnno] != model.Spec.Model.Name {
 			return false, nil
 		}
-		expected := deployment.DeepCopy()
-		applyChatTemplate(&expected.Spec.Template.Spec, &expected.Spec.Template.Spec.Containers[i], model.Spec.Serving.ChatTemplate)
-		if !reflect.DeepEqual(expected.Spec.Template.Spec.Volumes, deployment.Spec.Template.Spec.Volumes) ||
-			!reflect.DeepEqual(expected.Spec.Template.Spec.Containers[i].VolumeMounts, container.VolumeMounts) {
+		if !chatTemplateMounted(&deployment.Spec.Template.Spec, container, model.Spec.Serving.ChatTemplate) {
 			return false, nil
 		}
 		wantDigest := ""
@@ -584,6 +581,9 @@ func (r *LLMActiveModelReconciler) deploymentMatchesModel(ctx context.Context, a
 // applyChatTemplate owns one reserved volume/mount pair on the runtime
 // container. It returns whether it changed the Pod spec.
 func applyChatTemplate(podSpec *corev1.PodSpec, container *corev1.Container, template *cogitodevv1alpha1.ChatTemplateSpec) bool {
+	if template != nil && chatTemplateMounted(podSpec, container, template) {
+		return false
+	}
 	beforeVolumes := append([]corev1.Volume(nil), podSpec.Volumes...)
 	beforeMounts := append([]corev1.VolumeMount(nil), container.VolumeMounts...)
 
@@ -617,6 +617,49 @@ func applyChatTemplate(podSpec *corev1.PodSpec, container *corev1.Container, tem
 		})
 	}
 	return !reflect.DeepEqual(beforeVolumes, podSpec.Volumes) || !reflect.DeepEqual(beforeMounts, container.VolumeMounts)
+}
+
+// chatTemplateMounted compares only the controller-owned parts of the
+// ConfigMap volume/mount. Kubernetes may default unrelated fields such as
+// ConfigMapVolumeSource.DefaultMode after a Deployment is persisted.
+func chatTemplateMounted(podSpec *corev1.PodSpec, container *corev1.Container, template *cogitodevv1alpha1.ChatTemplateSpec) bool {
+	if template == nil {
+		for _, volume := range podSpec.Volumes {
+			if volume.Name == chatTemplateVolumeName {
+				return false
+			}
+		}
+		for _, mount := range container.VolumeMounts {
+			if mount.Name == chatTemplateVolumeName {
+				return false
+			}
+		}
+		return true
+	}
+
+	var volume *corev1.Volume
+	for i := range podSpec.Volumes {
+		if podSpec.Volumes[i].Name == chatTemplateVolumeName {
+			if volume != nil {
+				return false
+			}
+			volume = &podSpec.Volumes[i]
+		}
+	}
+	if volume == nil || volume.ConfigMap == nil || volume.ConfigMap.Name != template.ConfigMapKeyRef.Name || len(volume.ConfigMap.Items) != 1 {
+		return false
+	}
+	item := volume.ConfigMap.Items[0]
+	if item.Key != template.ConfigMapKeyRef.Key || item.Path != chatTemplateMountFile {
+		return false
+	}
+
+	for _, mount := range container.VolumeMounts {
+		if mount.Name == chatTemplateVolumeName {
+			return mount.MountPath == chatTemplateMountDir && mount.ReadOnly
+		}
+	}
+	return false
 }
 
 func (r *LLMActiveModelReconciler) scaleDeployment(ctx context.Context, name, namespace string, replicas int32) error {

@@ -155,6 +155,18 @@ func TestActivateDeploymentMountsAndRemovesChatTemplate(t *testing.T) {
 	if got := mounted.Spec.Template.Annotations[chatTemplateAnno]; got != model.Spec.Serving.ChatTemplate.SHA256 {
 		t.Fatalf("template annotation = %q", got)
 	}
+	defaultMode := int32(420)
+	mounted.Spec.Template.Spec.Volumes[0].ConfigMap.DefaultMode = &defaultMode
+	if err := client.Update(context.Background(), &mounted); err != nil {
+		t.Fatal(err)
+	}
+	matches, err := reconciler.deploymentMatchesModel(context.Background(), active, model, backend)
+	if err != nil || !matches {
+		t.Fatalf("defaulted template volume must match desired state: matches=%v err=%v", matches, err)
+	}
+	if err := reconciler.activateDeployment(context.Background(), active, model, backend); err != nil {
+		t.Fatal(err)
+	}
 
 	model.Spec.Serving.ChatTemplate = nil
 	if err := reconciler.activateDeployment(context.Background(), active, model, backend); err != nil {
