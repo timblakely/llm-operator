@@ -2,9 +2,9 @@
 
 ## Status
 
-**In progress.** The operator contract, validation, and workload-reconciliation
-work are being implemented. Cogito Qwen resources must not be reconciled until
-the matching operator image and chart are published and reviewed.
+**Complete for M9.0–M9.3.** The operator contract, validation, and
+workload-reconciliation path are live in Cogito. M9.4 remains an eventual
+hardening/generalization TODO.
 
 ## Objective
 
@@ -89,9 +89,9 @@ pair and cleans it up when no template is selected.
 4. Add unit/envtest coverage for absent, valid, missing, changed, and
    mismatched templates.
 
-**Status:** in progress. API, generated CRD/RBAC, digest resolution, targeted
-ConfigMap watches, conditions, and unit coverage are implemented; the chart
-release and cluster validation remain pending.
+**Status:** complete. API, generated CRD/RBAC, digest resolution, targeted
+ConfigMap watches, conditions, and unit coverage are implemented and live
+validated. Chart RBAC includes cluster-wide ConfigMap read/watch access.
 
 **Exit:** a valid template reference is observable and invalid references fail
 predictably without mutating a running backend.
@@ -108,10 +108,11 @@ predictably without mutating a running backend.
 5. Add render and fake-client transition tests proving no duplicate flags,
    stable volume names, removal on model change, and sidecar preservation.
 
-**Status:** in progress. vLLM and llama.cpp argument/mount generation plus
-Deployment cleanup are implemented and unit-tested. The deployed llama.cpp
-flag verification and integration validation remain pending; SGLang is still
-explicitly unsupported for templates.
+**Status:** complete for vLLM. vLLM and llama.cpp argument/mount generation
+plus Deployment cleanup are implemented and unit-tested. The Qwen vLLM
+rollout also verified that Kubernetes-defaulted ConfigMap-volume fields do not
+cause repeated Deployment rollouts. Deployed llama.cpp flag verification and
+integration validation remain TODO; SGLang is explicitly unsupported.
 
 **Exit:** drivers produce deterministic, backend-correct Pod mutations with
 complete cleanup.
@@ -127,7 +128,14 @@ complete cleanup.
 5. Replay the captured Pi request and validate an actual Pi tool loop yields
    structured OpenAI `tool_calls`, including a post-tool response.
 
-**Exit:** Qwen returns structured calls for the regression payload without
+**Status:** complete. Cogito ran chart `0.1.9` with manager image
+`sha256:5f141b6db574191ed23fc2f73c7dc27839eb3fa98d4d8245a879cd9a9bcac44f`.
+The live Qwen pod mounted the expected ConfigMap, carried the pinned digest,
+and used `--chat-template /etc/llm-templates/chat-template.jinja` with
+`qwen3_coder`. The exact captured Pi request returned an OpenAI `bash` tool
+call; the post-tool response completed normally with `finish_reason: stop`.
+
+**Exit:** met. Qwen returns structured calls for the regression payload without
 using request-level template overrides or a Pi-specific `tool_choice` shim.
 
 ### M9.4 — Generalization and operational hardening
