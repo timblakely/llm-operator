@@ -2,9 +2,9 @@
 
 ## Status
 
-**Planned.** Do not activate DeepSeek V4 Flash until the shared-cache contract,
-cache-manager image, and same-runtime backend transition behavior have all
-passed the gates below.
+**Implementation and GitOps rollout in progress.** SMC.0–SMC.2 are complete;
+SMC.3 is reconciled but awaits HelmRelease recovery verification. Do not
+activate DeepSeek V4 Flash until SMC.3 and SMC.4 pass.
 
 ## Objective
 
@@ -78,6 +78,8 @@ documentation work.
 **Exit:** reviewed API/layout/rollback record; no live mounts, images, or
 active model selection changed.
 
+**Status:** complete.
+
 ### SMC.1 — Operator contract and transition safety
 
 1. Extend the cache request emitted by the llama.cpp driver with the validated
@@ -94,6 +96,11 @@ active model selection changed.
 
 **Exit:** a model's cache request identifies its exact shared-cache location,
 and same-runtime cross-backend transitions are covered by automated tests.
+
+**Status:** complete. `make check` passed, the operator image was published as
+`sha256:c430d8b5791960a88c70d1c82a4d94ec2b96e33006b4151022777639f713e682`,
+and chart `0.1.10` was published at
+`sha256:971633c4d9428bcb4f67d31e1dc3e7cb06e5c384a23b32c04d51876c08c1a8ac`.
 
 ### SMC.2 — Cache-manager implementation and image
 
@@ -112,6 +119,9 @@ and same-runtime cross-backend transitions are covered by automated tests.
 
 **Exit:** cache-manager tests pass and the published image can safely manage
 multiple artifact kinds from one hot root without a backend-specific path.
+
+**Status:** complete. The image was published as
+`ghcr.io/timblakely/llm-cache-manager:shared-cache-20260802.1@sha256:2990176abc04777860f61c70ebacf5d74c4bf6aad943d1db0fe5daa5b13884e9`.
 
 ### SMC.3 — Cogito storage and GitOps migration
 
@@ -135,6 +145,10 @@ multiple artifact kinds from one hot root without a backend-specific path.
 **Exit:** all three runtime Deployments and cache-manager render with one PVC
 and correct subpaths; no model is activated during the storage/mount migration.
 
+**Status:** in progress. Flux applied Cogito revision `1e3d2001`; operator and
+cache-manager upgraded successfully. Laguna and DeepSeek HelmReleases require
+post-fix Ready verification after correcting the `existingClaim` chart schema.
+
 ### SMC.4 — Canary activation and evidence
 
 1. Verify that the cache-manager reports one shared capacity and that existing
@@ -154,6 +168,9 @@ and correct subpaths; no model is activated during the storage/mount migration.
 
 **Exit:** all acceptance checks below pass in Cogito without manual file copies
 or cache-manager path overrides.
+
+**Status:** not started. The next action is to confirm the two HelmReleases are
+Ready and inspect their rendered mounts before any model activation.
 
 ## Acceptance Conditions
 
