@@ -2,9 +2,10 @@
 
 ## Status
 
-**Implementation and GitOps rollout in progress.** SMC.0–SMC.2 are complete;
-SMC.3 is reconciled but awaits HelmRelease recovery verification. Do not
-activate DeepSeek V4 Flash until SMC.3 and SMC.4 pass.
+**Shared-cache migration is live; canary evidence is in progress.** SMC.0–SMC.3
+are complete. DeepSeek V4 Flash is Ready and `LLMActiveModel/default` is
+Stable through the shared cache; complete the remaining SMC.4 transition,
+eviction, tool-call, and streaming evidence before closing the rollout.
 
 ## Objective
 
@@ -145,9 +146,12 @@ multiple artifact kinds from one hot root without a backend-specific path.
 **Exit:** all three runtime Deployments and cache-manager render with one PVC
 and correct subpaths; no model is activated during the storage/mount migration.
 
-**Status:** in progress. Flux applied Cogito revision `1e3d2001`; operator and
-cache-manager upgraded successfully. Laguna and DeepSeek HelmReleases require
-post-fix Ready verification after correcting the `existingClaim` chart schema.
+**Status:** complete. The shared `llm-huggingface-cache` PVC is mounted at
+`/cache/hot` for cache-manager and as its `hub`/`gguf` subpaths for vLLM and
+llama.cpp. Cogito revision `0836a000` preserves an inactive vLLM baseline of
+zero replicas while the operator owns activation. The final cache-manager
+release repairs legacy GGUF links from retained hot blobs without download;
+DeepSeek materialized links resolve within `gguf/.blobs`.
 
 ### SMC.4 — Canary activation and evidence
 
@@ -169,8 +173,14 @@ post-fix Ready verification after correcting the `existingClaim` chart schema.
 **Exit:** all acceptance checks below pass in Cogito without manual file copies
 or cache-manager path overrides.
 
-**Status:** not started. The next action is to confirm the two HelmReleases are
-Ready and inspect their rendered mounts before any model activation.
+**Status:** in progress. Laguna and DeepSeek cache paths were exercised, and
+DeepSeek completed a shared-cache recovery without OOM or re-download. Its
+backend is Ready/Serving, `LLMActiveModel/default` is Stable, and a proxied
+DeepSeek chat completion returned HTTP 200. The proxy is explicitly handed
+off to `deepseek-v4-flash` while it is active; a Laguna rollback must restore
+the URL, deployment, and container settings together. Remaining evidence:
+eviction at watermark, both llama.cpp direction transitions, tool call and
+tool-result continuation, streaming deltas, and the full acceptance capture.
 
 ## Acceptance Conditions
 
