@@ -329,7 +329,7 @@ func (r *LLMActiveModelReconciler) executeTransition(ctx context.Context, active
 		return r.failTransition(ctx, activeModel, model.Spec.Model.Name, "InvalidCacheConfiguration", "invalid_cache_configuration", err)
 	}
 	if r.CacheManagerURL != "" && cacheRequest != nil {
-		cacheClient := cache.NewWithHTTPClient(r.CacheManagerURL, r.httpClient())
+		cacheClient := cache.NewWithHTTPClient(r.CacheManagerURL, r.cacheHTTPClient())
 		result, err := cacheClient.Ensure(transitionCtx, cacheRequest)
 		if err != nil {
 			logger.Error(err, "cache ensure failed")
@@ -733,6 +733,16 @@ func (r *LLMActiveModelReconciler) httpClient() *http.Client {
 		return r.HTTPClient
 	}
 	return &http.Client{Timeout: 10 * time.Second}
+}
+
+// cacheHTTPClient leaves cache promotion bounded by transitionCtx instead of
+// the short runtime probe timeout. A cold GGUF hydrate can legitimately take
+// minutes; cancelling it after ten seconds restarts the transition while the
+// cache-manager continues the same copy in the background.
+func (r *LLMActiveModelReconciler) cacheHTTPClient() *http.Client {
+	clone := *r.httpClient()
+	clone.Timeout = 0
+	return &clone
 }
 
 func (r *LLMActiveModelReconciler) SetupWithManager(mgr ctrl.Manager) error {

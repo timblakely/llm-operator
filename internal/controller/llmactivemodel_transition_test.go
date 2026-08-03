@@ -81,6 +81,17 @@ func TestTransitionCacheManagerUnavailable(t *testing.T) {
 	}
 }
 
+func TestCacheHTTPClientUsesTransitionContextTimeout(t *testing.T) {
+	t.Parallel()
+	reconciler := &LLMActiveModelReconciler{HTTPClient: &http.Client{Timeout: 10 * time.Second}}
+	if got := reconciler.cacheHTTPClient().Timeout; got != 0 {
+		t.Fatalf("cache client timeout = %s, want 0", got)
+	}
+	if got := reconciler.httpClient().Timeout; got != 10*time.Second {
+		t.Fatalf("runtime client timeout = %s, want unchanged", got)
+	}
+}
+
 func TestSuccessfulTransitionCachesAndDeactivatesPreviousModel(t *testing.T) {
 	t.Parallel()
 
