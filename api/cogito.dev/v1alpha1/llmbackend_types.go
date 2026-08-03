@@ -17,6 +17,7 @@
 package cogitodevv1alpha1
 
 import (
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -31,6 +32,10 @@ const (
 	BackendPhaseServing  LLMBackendPhase = "Serving"
 	BackendPhaseFailed   LLMBackendPhase = "Failed"
 )
+
+// BackendWorkloadFinalizer prevents an active workload-owning backend from
+// being removed before the active model has moved elsewhere.
+const BackendWorkloadFinalizer = "llm.cogito.dev/backend-workload-protection"
 
 // GPUResourceRequirements describes GPU resources for a backend.
 // +kubebuilder:object:generate=true
@@ -47,16 +52,26 @@ type LLMBackendSpec struct {
 	// Type is the backend runtime: "vllm", "sglang", or "llama-cpp".
 	Type BackendType `json:"type"`
 
-	// DeploymentRef points to the Kubernetes Deployment that runs this backend.
-	DeploymentRef corev1.LocalObjectReference `json:"deploymentRef"`
+	// Workload declares the complete serving workload. The operator creates and
+	// owns the Deployment and Service from this template. During migration, this
+	// is mutually exclusive with the deprecated reference fields below.
+	Workload *BackendWorkloadSpec `json:"workload,omitempty"`
+
+	// DeploymentRef points to a Kubernetes Deployment that runs this backend.
+	// Deprecated: use Workload. It exists only to permit a non-disruptive
+	// migration of existing backends.
+	DeploymentRef corev1.LocalObjectReference `json:"deploymentRef,omitempty"`
 
 	// ContainerName is the container within the deployment that serves requests.
-	ContainerName string `json:"containerName"`
+	// Deprecated: in workload mode use workload.containerName.
+	ContainerName string `json:"containerName,omitempty"`
 
 	// ServiceRef points to the Service that exposes this backend.
-	ServiceRef corev1.LocalObjectReference `json:"serviceRef"`
+	// Deprecated: use Workload.
+	ServiceRef corev1.LocalObjectReference `json:"serviceRef,omitempty"`
 
 	// Port is the serving port on the backend container.
+	// Deprecated: in workload mode use workload.service.port.
 	// +kubebuilder:validation:Minimum=1
 	Port int `json:"port"`
 
@@ -65,6 +80,58 @@ type LLMBackendSpec struct {
 
 	// GPU resources required by this backend.
 	GPUResources *GPUResourceRequirements `json:"gpuResources,omitempty"`
+}
+
+// BackendWorkloadSpec is the complete Kubernetes workload owned by an
+// LLMBackend. The operator supplies selectors, ownership metadata, active
+// model annotations, and runtime arguments; all other Pod details belong here.
+// +kubebuilder:object:generate=true
+type BackendWorkloadSpec struct {
+	// ContainerName identifies exactly one runtime container in Deployment.PodTemplate.
+	ContainerName string `json:"containerName"`
+
+	// Deployment configures the generated Deployment.
+	Deployment BackendDeploymentSpec `json:"deployment"`
+
+	// Service configures the generated ClusterIP Service.
+	Service BackendServiceSpec `json:"service"`
+}
+
+// BackendDeploymentSpec describes the generated Deployment baseline.
+// +kubebuilder:object:generate=true
+type BackendDeploymentSpec struct {
+	// Name is the generated Deployment name. It defaults to the LLMBackend name.
+	// Specify a distinct temporary name during a Helm-to-operator migration.
+	Name string `json:"name,omitempty"`
+
+	// Replicas is the inactive baseline. The active-model controller owns the
+	// runtime value and switches it between zero and one.
+	// +kubebuilder:default:=0
+	Replicas *int32 `json:"replicas,omitempty"`
+
+	// Strategy is applied to the generated Deployment.
+	Strategy appsv1.DeploymentStrategy `json:"strategy,omitempty"`
+
+	// PodTemplate is the complete native Kubernetes pod template.
+	PodTemplate corev1.PodTemplateSpec `json:"podTemplate"`
+}
+
+// BackendServiceSpec describes the generated Service.
+// +kubebuilder:object:generate=true
+type BackendServiceSpec struct {
+	// Name is the generated Service name. It defaults to the LLMBackend name.
+	// Specify a distinct temporary name during a Helm-to-operator migration.
+	Name string `json:"name,omitempty"`
+
+	// Port is the serving port exposed by the generated ClusterIP Service.
+	// +kubebuilder:validation:Minimum=1
+	Port int `json:"port"`
+
+	// PortName is the optional Service port name. It defaults to http.
+	PortName string `json:"portName,omitempty"`
+
+	// Annotations are applied to the generated Service.
+	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
 // LLMBackendStatus defines the observed state of LLMBackend.

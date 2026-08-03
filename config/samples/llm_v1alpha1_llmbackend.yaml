@@ -5,18 +5,31 @@ metadata:
   namespace: llm
 spec:
   type: vllm
-  deploymentRef:
-    name: llm-vllm
-  containerName: vllm
-  serviceRef:
-    name: llm-vllm
-  port: 8000
-  runtimeClassName: nvidia
-  gpuResources:
-    requests:
-      nvidia.com/gpu: "4"
-    limits:
-      nvidia.com/gpu: "4"
+  workload:
+    containerName: runtime
+    service:
+      port: 8000
+    deployment:
+      replicas: 0
+      strategy:
+        type: Recreate
+      podTemplate:
+        spec:
+          automountServiceAccountToken: false
+          runtimeClassName: nvidia
+          containers:
+            - name: runtime
+              image: vllm/vllm-openai:v0.25.1
+              ports:
+                - name: http
+                  containerPort: 8000
+              resources:
+                requests:
+                  cpu: "4"
+                  memory: 24Gi
+                limits:
+                  memory: 96Gi
+                  nvidia.com/gpu: "4"
 ---
 apiVersion: llm.cogito.dev/v1alpha1
 kind: LLMBackend
@@ -25,15 +38,29 @@ metadata:
   namespace: llm
 spec:
   type: llama-cpp
-  deploymentRef:
-    name: laguna
-  containerName: laguna
-  serviceRef:
-    name: laguna
-  port: 8000
-  runtimeClassName: nvidia
-  gpuResources:
-    requests:
-      nvidia.com/gpu: "2"
-    limits:
-      nvidia.com/gpu: "2"
+  workload:
+    containerName: runtime
+    service:
+      port: 8000
+    deployment:
+      replicas: 0
+      strategy:
+        type: Recreate
+      podTemplate:
+        spec:
+          automountServiceAccountToken: false
+          runtimeClassName: nvidia
+          containers:
+            - name: runtime
+              image: ghcr.io/timblakely/llama-laguna:2026-07-22
+              ports:
+                - name: http
+                  containerPort: 8000
+              resources:
+                requests:
+                  cpu: "22"
+                  memory: 88Gi
+                limits:
+                  cpu: "24"
+                  memory: 96Gi
+                  nvidia.com/gpu: "2"

@@ -126,6 +126,12 @@ func main() {
 			setupLog.Error(err, "unable to create validating webhook", "webhook", "LLMModel")
 			os.Exit(1)
 		}
+		if err := ctrl.NewWebhookManagedBy(mgr, &cogitodevv1alpha1.LLMBackend{}).
+			WithValidator(operatoradmission.LLMBackendValidator{}).
+			Complete(); err != nil {
+			setupLog.Error(err, "unable to create validating webhook", "webhook", "LLMBackend")
+			os.Exit(1)
+		}
 	}
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up health check")

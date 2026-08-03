@@ -23,11 +23,13 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -49,7 +51,9 @@ type LLMBackendReconciler struct {
 
 // +kubebuilder:rbac:groups=llm.cogito.dev,resources=llmbackends,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=llm.cogito.dev,resources=llmbackends/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch
+// +kubebuilder:rbac:groups=llm.cogito.dev,resources=llmbackends/finalizers,verbs=update
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 
 func (r *LLMBackendReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithValues("llmbackend", req.NamespacedName)
@@ -58,12 +62,27 @@ func (r *LLMBackendReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err := r.Get(ctx, req.NamespacedName, &backend); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	if !backend.DeletionTimestamp.IsZero() {
+		return r.reconcileBackendDeletion(ctx, &backend)
+	}
+	if backend.Spec.Workload != nil && !controllerutil.ContainsFinalizer(&backend, cogitodevv1alpha1.BackendWorkloadFinalizer) {
+		controllerutil.AddFinalizer(&backend, cogitodevv1alpha1.BackendWorkloadFinalizer)
+		return ctrl.Result{}, r.Update(ctx, &backend)
+	}
 
 	backend.Status.ObservedGeneration = backend.GetGeneration()
+	if err := r.ensureBackendWorkload(ctx, &backend); err != nil {
+		setBackendCondition(&backend.Status, DeploymentExistsCondition, metav1.ConditionFalse, "WorkloadInvalid", err.Error())
+		backend.Status.Phase = cogitodevv1alpha1.BackendPhaseFailed
+		if statusErr := r.Status().Update(ctx, &backend); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		return ctrl.Result{}, nil
+	}
 
-	// Look up referenced Deployment
+	// Look up the generated or migration-era referenced Deployment.
 	var deployment appsv1.Deployment
-	if err := r.Get(ctx, types.NamespacedName{Name: backend.Spec.DeploymentRef.Name, Namespace: backend.Namespace}, &deployment); err != nil {
+	if err := r.Get(ctx, types.NamespacedName{Name: backendDeploymentName(&backend), Namespace: backend.Namespace}, &deployment); err != nil {
 		setBackendCondition(&backend.Status, DeploymentExistsCondition, metav1.ConditionFalse, "NotFound", err.Error())
 		backend.Status.Phase = cogitodevv1alpha1.BackendPhaseFailed
 		backend.Status.Replicas = 0
@@ -102,7 +121,7 @@ func (r *LLMBackendReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			}
 			return ctrl.Result{}, nil
 		}
-		backendURL := fmt.Sprintf("http://%s:%d", backend.Spec.ServiceRef.Name, backend.Spec.Port)
+		backendURL := fmt.Sprintf("http://%s:%d", backendServiceName(&backend), backendPort(&backend))
 		if err := driver.CheckHealth(ctx, r.HTTPClient, backendURL); err == nil {
 			setBackendCondition(&backend.Status, BackendHealthyCondition, metav1.ConditionTrue, "Healthy", "Backend is healthy")
 			setBackendCondition(&backend.Status, ModelLoadedCondition, metav1.ConditionTrue, "Loaded", "Model is loaded")
@@ -128,6 +147,48 @@ func (r *LLMBackendReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 	return ctrl.Result{}, nil
+}
+
+func (r *LLMBackendReconciler) reconcileBackendDeletion(ctx context.Context, backend *cogitodevv1alpha1.LLMBackend) (ctrl.Result, error) {
+	if backend.Spec.Workload == nil || !controllerutil.ContainsFinalizer(backend, cogitodevv1alpha1.BackendWorkloadFinalizer) {
+		return ctrl.Result{}, nil
+	}
+	active, err := r.backendIsActive(ctx, backend)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if active {
+		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+	}
+	controllerutil.RemoveFinalizer(backend, cogitodevv1alpha1.BackendWorkloadFinalizer)
+	return ctrl.Result{}, r.Update(ctx, backend)
+}
+
+func (r *LLMBackendReconciler) backendIsActive(ctx context.Context, backend *cogitodevv1alpha1.LLMBackend) (bool, error) {
+	var models cogitodevv1alpha1.LLMModelList
+	if err := r.List(ctx, &models, client.InNamespace(backend.Namespace)); err != nil {
+		return false, fmt.Errorf("list models while deleting backend: %w", err)
+	}
+	for _, model := range models.Items {
+		if model.Status.Active && model.Spec.BackendRef != nil && model.Spec.BackendRef.Name == backend.Name {
+			return true, nil
+		}
+	}
+	var activeModels cogitodevv1alpha1.LLMActiveModelList
+	if err := r.List(ctx, &activeModels, client.InNamespace(backend.Namespace)); err != nil {
+		return false, fmt.Errorf("list active models while deleting backend: %w", err)
+	}
+	for _, activeModel := range activeModels.Items {
+		if activeModel.Status.Phase != cogitodevv1alpha1.ActiveModelPhaseStable {
+			continue
+		}
+		for _, model := range models.Items {
+			if model.Spec.Model.Name == activeModel.Status.ModelName && model.Spec.BackendRef != nil && model.Spec.BackendRef.Name == backend.Name {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 func setBackendCondition(status *cogitodevv1alpha1.LLMBackendStatus, conditionType string, statusVal metav1.ConditionStatus, reason, message string) {
@@ -158,6 +219,7 @@ func (r *LLMBackendReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&cogitodevv1alpha1.LLMBackend{}).
+		Owns(&corev1.Service{}).
 		Watches(&appsv1.Deployment{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []ctrl.Request {
 			var list cogitodevv1alpha1.LLMBackendList
 			if err := r.List(ctx, &list, client.InNamespace(obj.GetNamespace())); err != nil {
@@ -165,7 +227,7 @@ func (r *LLMBackendReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			}
 			var requests []ctrl.Request
 			for _, b := range list.Items {
-				if b.Spec.DeploymentRef.Name == obj.GetName() {
+				if backendDeploymentName(&b) == obj.GetName() {
 					requests = append(requests, ctrl.Request{
 						NamespacedName: client.ObjectKeyFromObject(&b),
 					})

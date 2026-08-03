@@ -301,15 +301,15 @@ func (r *LLMActiveModelReconciler) executeTransition(ctx context.Context, active
 	if previousBackend == nil && previousBackendType != "" && previousBackendType != model.Spec.Serving.Backend {
 		previousBackend, _ = r.findBackend(ctx, activeModel.Namespace, previousBackendType, nil)
 	}
-	if previousBackend != nil && previousBackend.Spec.DeploymentRef.Name != backend.Spec.DeploymentRef.Name {
+	if previousBackend != nil && backendDeploymentName(previousBackend) != backendDeploymentName(backend) {
 		if err := checkCurrent(); err != nil {
 			return transitionCheckResult(err, logger)
 		}
-		if err := r.scaleDeployment(transitionCtx, previousBackend.Spec.DeploymentRef.Name, activeModel.Namespace, 0); err != nil {
+		if err := r.scaleDeployment(transitionCtx, backendDeploymentName(previousBackend), activeModel.Namespace, 0); err != nil {
 			logger.Error(err, "failed to scale down current backend")
 			return r.failTransition(ctx, activeModel, model.Spec.Model.Name, "ScaleDownFailed", "scale_down_failed", err)
 		}
-		if err := r.waitForScaleDown(transitionCtx, previousBackend.Spec.DeploymentRef.Name, activeModel.Namespace, checkCurrent); err != nil {
+		if err := r.waitForScaleDown(transitionCtx, backendDeploymentName(previousBackend), activeModel.Namespace, checkCurrent); err != nil {
 			if errors.Is(err, errTransitionChanged) {
 				return transitionCheckResult(err, logger)
 			}
@@ -368,7 +368,7 @@ func (r *LLMActiveModelReconciler) executeTransition(ctx context.Context, active
 	}
 
 	// Step 4: Wait for rollout and health
-	if err := r.waitForRollout(transitionCtx, backend.Spec.DeploymentRef.Name, activeModel.Namespace, checkCurrent); err != nil {
+	if err := r.waitForRollout(transitionCtx, backendDeploymentName(backend), activeModel.Namespace, checkCurrent); err != nil {
 		if errors.Is(err, errTransitionChanged) {
 			return transitionCheckResult(err, logger)
 		}
@@ -383,7 +383,7 @@ func (r *LLMActiveModelReconciler) executeTransition(ctx context.Context, active
 	// Step 5: Wait for runtime health. A Deployment can become available before
 	// the runtime has accepted its first connection, so a single refused dial is
 	// not a transition failure.
-	backendURL := fmt.Sprintf("http://%s:%d", backend.Spec.ServiceRef.Name, backend.Spec.Port)
+	backendURL := fmt.Sprintf("http://%s:%d", backendServiceName(backend), backendPort(backend))
 	if err := r.waitForBackendHealth(transitionCtx, driver, backendURL, checkCurrent); err != nil {
 		logger.Error(err, "backend health check failed")
 		return r.failTransition(ctx, activeModel, model.Spec.Model.Name, "HealthCheckFailed", "health_check_failed", err)
@@ -514,7 +514,7 @@ func (r *LLMActiveModelReconciler) failTransition(ctx context.Context, activeMod
 
 func (r *LLMActiveModelReconciler) activateDeployment(ctx context.Context, activeModel *cogitodevv1alpha1.LLMActiveModel, model *cogitodevv1alpha1.LLMModel, backend *cogitodevv1alpha1.LLMBackend) error {
 	var deployment appsv1.Deployment
-	if err := r.Get(ctx, types.NamespacedName{Name: backend.Spec.DeploymentRef.Name, Namespace: activeModel.Namespace}, &deployment); err != nil {
+	if err := r.Get(ctx, types.NamespacedName{Name: backendDeploymentName(backend), Namespace: activeModel.Namespace}, &deployment); err != nil {
 		return fmt.Errorf("get deployment: %w", err)
 	}
 	base := deployment.DeepCopy()
@@ -523,7 +523,7 @@ func (r *LLMActiveModelReconciler) activateDeployment(ctx context.Context, activ
 		deployment.Spec.Replicas = &one
 	}
 	for i := range deployment.Spec.Template.Spec.Containers {
-		if deployment.Spec.Template.Spec.Containers[i].Name == backend.Spec.ContainerName {
+		if deployment.Spec.Template.Spec.Containers[i].Name == backendContainerName(backend) {
 			desiredArgs := effectiveArgs(model)
 			argsChanged := !reflect.DeepEqual(deployment.Spec.Template.Spec.Containers[i].Args, desiredArgs)
 			activeChanged := deployment.Spec.Template.Annotations == nil || deployment.Spec.Template.Annotations[activeModelAnno] != model.Spec.Model.Name
@@ -556,17 +556,17 @@ func (r *LLMActiveModelReconciler) activateDeployment(ctx context.Context, activ
 			return r.Patch(ctx, &deployment, client.MergeFrom(base))
 		}
 	}
-	return fmt.Errorf("container %q not found in deployment %q", backend.Spec.ContainerName, deployment.Name)
+	return fmt.Errorf("container %q not found in deployment %q", backendContainerName(backend), deployment.Name)
 }
 
 func (r *LLMActiveModelReconciler) deploymentMatchesModel(ctx context.Context, activeModel *cogitodevv1alpha1.LLMActiveModel, model *cogitodevv1alpha1.LLMModel, backend *cogitodevv1alpha1.LLMBackend) (bool, error) {
 	var deployment appsv1.Deployment
-	if err := r.Get(ctx, types.NamespacedName{Name: backend.Spec.DeploymentRef.Name, Namespace: activeModel.Namespace}, &deployment); err != nil {
+	if err := r.Get(ctx, types.NamespacedName{Name: backendDeploymentName(backend), Namespace: activeModel.Namespace}, &deployment); err != nil {
 		return false, fmt.Errorf("get deployment: %w", err)
 	}
 	for i := range deployment.Spec.Template.Spec.Containers {
 		container := &deployment.Spec.Template.Spec.Containers[i]
-		if container.Name != backend.Spec.ContainerName {
+		if container.Name != backendContainerName(backend) {
 			continue
 		}
 		if !reflect.DeepEqual(container.Args, effectiveArgs(model)) || deployment.Spec.Template.Annotations[activeModelAnno] != model.Spec.Model.Name {
@@ -581,7 +581,7 @@ func (r *LLMActiveModelReconciler) deploymentMatchesModel(ctx context.Context, a
 		}
 		return deployment.Spec.Template.Annotations[chatTemplateAnno] == wantDigest, nil
 	}
-	return false, fmt.Errorf("container %q not found in deployment %q", backend.Spec.ContainerName, deployment.Name)
+	return false, fmt.Errorf("container %q not found in deployment %q", backendContainerName(backend), deployment.Name)
 }
 
 // applyChatTemplate owns one reserved volume/mount pair on the runtime
