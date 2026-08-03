@@ -77,6 +77,12 @@ spec:
                     items:
                       type: string
                     type: array
+                  materializationTarget:
+                    description: |-
+                      MaterializationTarget is the cache-manager-owned relative directory for a
+                      file-based artifact in the shared hot cache. It must be rooted at gguf/;
+                      omit it only while migrating a legacy per-backend GGUF cache.
+                    type: string
                 type: object
               backendRef:
                 description: |-

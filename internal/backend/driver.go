@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path"
 	"strconv"
 	"strings"
 
@@ -159,6 +160,11 @@ func (d runtimeDriver) Validate(model *cogitodevv1alpha1.LLMModel) error {
 			if len(model.Spec.Artifact.Files) == 0 {
 				return fmt.Errorf("backend %q requires artifact.files for cached GGUF artifacts", d.kind)
 			}
+			if target := model.Spec.Artifact.MaterializationTarget; target != "" {
+				if !strings.HasPrefix(target, "gguf/") || path.Clean(target) != target || strings.HasPrefix(target, "/") || strings.Contains(target, "..") {
+					return fmt.Errorf("backend %q requires artifact.materializationTarget to be a clean relative path rooted at gguf/", d.kind)
+				}
+			}
 		}
 	}
 	return nil
@@ -279,10 +285,11 @@ func (d runtimeDriver) CacheRequest(model *cogitodevv1alpha1.LLMModel) (*cache.C
 		repository = model.Spec.Model.ArtifactRepository
 	}
 	cacheSpec := cache.CacheSpec{
-		Kind:     cacheManagerKind(d.capabilities.CacheFormat),
-		RepoID:   repository,
-		Revision: model.Spec.Model.Revision,
-		Files:    append([]string(nil), model.Spec.Artifact.Files...),
+		Kind:                  cacheManagerKind(d.capabilities.CacheFormat),
+		RepoID:                repository,
+		Revision:              model.Spec.Model.Revision,
+		Files:                 append([]string(nil), model.Spec.Artifact.Files...),
+		MaterializationTarget: model.Spec.Artifact.MaterializationTarget,
 	}
 	if model.Spec.Artifact.ExpectedSize != "" {
 		size, err := parseSize(model.Spec.Artifact.ExpectedSize)

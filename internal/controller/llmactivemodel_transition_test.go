@@ -255,6 +255,29 @@ func TestCrossBackendScaleDownOrdering(t *testing.T) {
 	}
 }
 
+func TestSameRuntimeBackendsScaleDownOrdering(t *testing.T) {
+	t.Parallel()
+	previous := modelFor("laguna", "acme/laguna", cogitodevv1alpha1.BackendLlamaCpp)
+	target := modelFor("deepseek", "acme/deepseek", cogitodevv1alpha1.BackendLlamaCpp)
+	previous.Spec.BackendRef = &corev1.LocalObjectReference{Name: "laguna"}
+	target.Spec.BackendRef = &corev1.LocalObjectReference{Name: "deepseek"}
+	fromBackend := backendFor("laguna", "laguna-deployment", "laguna", cogitodevv1alpha1.BackendLlamaCpp)
+	toBackend := backendFor("deepseek", "deepseek-deployment", "deepseek", cogitodevv1alpha1.BackendLlamaCpp)
+	fromDeployment := deploymentFor("laguna-deployment", "laguna", 1, false)
+	toDeployment := deploymentFor("deepseek-deployment", "deepseek", 0, true)
+	active := activeFor("active", target.Spec.Model.Name)
+	active.Status = cogitodevv1alpha1.LLMActiveModelStatus{ModelName: previous.Spec.Model.Name, BackendType: cogitodevv1alpha1.BackendLlamaCpp, Phase: cogitodevv1alpha1.ActiveModelPhaseStable}
+
+	reconciler, baseClient := transitionReconciler(t, successHTTPClient(), fromDeployment, toDeployment, previous, target, fromBackend, toBackend, active)
+	recorder := &deploymentPatchRecorder{Client: baseClient}
+	reconciler.Client = recorder
+	reconcileActive(t, reconciler, active)
+	patches := recorder.snapshot()
+	if len(patches) < 2 || patches[0] != (deploymentPatch{name: fromDeployment.Name, replicas: 0}) || patches[1] != (deploymentPatch{name: toDeployment.Name, replicas: 1}) {
+		t.Fatalf("deployment patches = %#v, want Laguna scale-down then DeepSeek activation", patches)
+	}
+}
+
 func TestChangedModelCancelsTransitionBeforeActivation(t *testing.T) {
 	t.Parallel()
 

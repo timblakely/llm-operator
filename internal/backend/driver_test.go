@@ -246,6 +246,9 @@ func TestDriverCacheRequestContracts(t *testing.T) {
 			model.Spec.Model.Source = "acme/source"
 			model.Spec.Model.ArtifactRepository = "acme/gguf"
 			model.Spec.Artifact = &cogitodevv1alpha1.ArtifactSpec{ExpectedSize: "2Gi", Files: []string{"model.gguf"}}
+			if tt.backend == cogitodevv1alpha1.BackendLlamaCpp {
+				model.Spec.Artifact.MaterializationTarget = "gguf/acme-model-abc123"
+			}
 			driver, err := DefaultRegistry().Driver(tt.backend)
 			if err != nil {
 				t.Fatal(err)
@@ -260,7 +263,24 @@ func TestDriverCacheRequestContracts(t *testing.T) {
 			if request.Cache.RepoID != tt.wantRepository || request.Cache.Kind != tt.wantCacheKind || request.Cache.Size != 2*1024*1024*1024 {
 				t.Fatalf("cache request = %#v", request)
 			}
+			if tt.backend == cogitodevv1alpha1.BackendLlamaCpp && request.Cache.MaterializationTarget != "gguf/acme-model-abc123" {
+				t.Fatalf("cache target = %q", request.Cache.MaterializationTarget)
+			}
 		})
+	}
+}
+
+func TestLlamaCPPRejectsUnsafeMaterializationTarget(t *testing.T) {
+	t.Parallel()
+	model := contractModel(cogitodevv1alpha1.BackendLlamaCpp)
+	model.Spec.Model.ArtifactRepository = "acme/gguf"
+	model.Spec.Artifact = &cogitodevv1alpha1.ArtifactSpec{ExpectedSize: "2Gi", Files: []string{"model.gguf"}, MaterializationTarget: "../escape"}
+	driver, err := DefaultRegistry().Driver(cogitodevv1alpha1.BackendLlamaCpp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := driver.Validate(model); err == nil {
+		t.Fatal("llama.cpp accepted an unsafe materialization target")
 	}
 }
 

@@ -92,6 +92,11 @@ type ArtifactSpec struct {
 
 	// Files lists individual files for GGUF/file-based artifacts.
 	Files []string `json:"files,omitempty"`
+
+	// MaterializationTarget is the cache-manager-owned relative directory for a
+	// file-based artifact in the shared hot cache. It must be rooted at gguf/;
+	// omit it only while migrating a legacy per-backend GGUF cache.
+	MaterializationTarget string `json:"materializationTarget,omitempty"`
 }
 
 // ServingSpec describes the serving configuration for a model.

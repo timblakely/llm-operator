@@ -59,11 +59,12 @@ type CacheRequest struct {
 
 // CacheSpec describes an immutable model artifact for caching.
 type CacheSpec struct {
-	Kind     string   `json:"kind"`
-	RepoID   string   `json:"repo_id"`
-	Revision string   `json:"revision"`
-	Size     int64    `json:"size_bytes"`
-	Files    []string `json:"files,omitempty"`
+	Kind                  string   `json:"kind"`
+	RepoID                string   `json:"repo_id"`
+	Revision              string   `json:"revision"`
+	Size                  int64    `json:"size_bytes"`
+	Files                 []string `json:"files,omitempty"`
+	MaterializationTarget string   `json:"materialization_target,omitempty"`
 }
 
 // CacheResult is the cache location returned by the cache-manager.

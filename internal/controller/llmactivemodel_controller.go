@@ -284,33 +284,39 @@ func (r *LLMActiveModelReconciler) executeTransition(ctx context.Context, active
 	}
 
 	previousBackendType := activeModel.Status.BackendType
+	var previousBackend *cogitodevv1alpha1.LLMBackend
 	if activeModel.Status.TransitionFrom != "" {
 		if previousModel, err := r.findModel(ctx, activeModel.Namespace, activeModel.Status.TransitionFrom); err == nil {
 			previousBackendType = previousModel.Spec.Serving.Backend
+			previousBackend, err = r.findBackend(ctx, activeModel.Namespace, previousModel.Spec.Serving.Backend, previousModel.Spec.BackendRef)
+			if err != nil {
+				return r.failTransition(ctx, activeModel, model.Spec.Model.Name, "PreviousBackendNotFound", "previous_backend_not_found", err)
+			}
 		}
 	}
 
-	// Step 1: Scale down current backend if different
-	currentBackendType := previousBackendType
-	if currentBackendType != "" && currentBackendType != model.Spec.Serving.Backend {
-		currentBackend, err := r.findBackend(ctx, activeModel.Namespace, currentBackendType, nil)
-		if err == nil && currentBackend != nil {
-			if err := checkCurrent(); err != nil {
+	// Step 1: Scale down the actual current backend when it is not the target.
+	// Backend type alone is insufficient: Laguna and DeepSeek are separate
+	// llama.cpp deployments that contend for the same GPUs.
+	if previousBackend == nil && previousBackendType != "" && previousBackendType != model.Spec.Serving.Backend {
+		previousBackend, _ = r.findBackend(ctx, activeModel.Namespace, previousBackendType, nil)
+	}
+	if previousBackend != nil && previousBackend.Spec.DeploymentRef.Name != backend.Spec.DeploymentRef.Name {
+		if err := checkCurrent(); err != nil {
+			return transitionCheckResult(err, logger)
+		}
+		if err := r.scaleDeployment(transitionCtx, previousBackend.Spec.DeploymentRef.Name, activeModel.Namespace, 0); err != nil {
+			logger.Error(err, "failed to scale down current backend")
+			return r.failTransition(ctx, activeModel, model.Spec.Model.Name, "ScaleDownFailed", "scale_down_failed", err)
+		}
+		if err := r.waitForScaleDown(transitionCtx, previousBackend.Spec.DeploymentRef.Name, activeModel.Namespace, checkCurrent); err != nil {
+			if errors.Is(err, errTransitionChanged) {
 				return transitionCheckResult(err, logger)
 			}
-			if err := r.scaleDeployment(transitionCtx, currentBackend.Spec.DeploymentRef.Name, activeModel.Namespace, 0); err != nil {
-				logger.Error(err, "failed to scale down current backend")
-				return r.failTransition(ctx, activeModel, model.Spec.Model.Name, "ScaleDownFailed", "scale_down_failed", err)
-			}
-			if err := r.waitForScaleDown(transitionCtx, currentBackend.Spec.DeploymentRef.Name, activeModel.Namespace, checkCurrent); err != nil {
-				if errors.Is(err, errTransitionChanged) {
-					return transitionCheckResult(err, logger)
-				}
-				logger.Error(err, "timeout waiting for current backend to scale down")
-				return r.failTransition(ctx, activeModel, model.Spec.Model.Name, "ScaleDownTimeout", "scale_down_timeout", err)
-			}
-			logger.Info("current backend scaled down", "backend", currentBackend.Name)
+			logger.Error(err, "timeout waiting for current backend to scale down")
+			return r.failTransition(ctx, activeModel, model.Spec.Model.Name, "ScaleDownTimeout", "scale_down_timeout", err)
 		}
+		logger.Info("current backend scaled down", "backend", previousBackend.Name)
 	}
 
 	if err := checkCurrent(); err != nil {
