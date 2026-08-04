@@ -60,6 +60,26 @@ spec:
           spec:
             description: LLMBackendSpec defines the desired state of LLMBackend.
             properties:
+              capacity:
+                description: |-
+                  Capacity is the normalized accelerator requirement used for placement
+                  decisions. In workload mode it must match the runtime container's GPU
+                  request and limit.
+                properties:
+                  gpus:
+                    description: GPUs is the number of GPUs required while the backend
+                      is running.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  resourceName:
+                    description: |-
+                      ResourceName is the extended resource used by the runtime container.
+                      It defaults to nvidia.com/gpu.
+                    type: string
+                required:
+                - gpus
+                type: object
               containerName:
                 description: |-
                   ContainerName is the container within the deployment that serves requests.

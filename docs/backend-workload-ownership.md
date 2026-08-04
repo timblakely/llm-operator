@@ -22,6 +22,22 @@ reconciles their full desired specification. It owns their lifecycle: deleting a
 `LLMBackend` deletes its workload after the active-model safety check has
 passed.
 
+## Model and GPU placement contract
+
+`LLMModel.spec.backendRef` is the explicit model-to-backend mapping. A backend
+also declares a normalized GPU requirement (`spec.capacity.gpus` and optional
+resource name) in addition to its native Pod resource limits. Admission must
+require that the runtime container's GPU request and limit match that declared
+capacity.
+
+The transition controller uses this declared capacity for placement safety: it
+must not start a target if the total GPU requirements of already-running
+backends plus the target exceeds the cluster budget. For the current two-GPU
+Cogito node, any two-GPU target first requires every other GPU backend to be
+at zero. This is a capacity rule, not a permanent one-active-backend rule;
+future one-GPU backends may run concurrently once routing supports multiple
+active models.
+
 ## API shape
 
 The initial compatible API adds `spec.workload` to `v1alpha1` and deprecates

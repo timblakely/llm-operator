@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
 	admission "sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	cogitodevv1alpha1 "github.com/timblakely/llm-operator/api/cogito.dev/v1alpha1"
@@ -38,6 +39,9 @@ func validateBackend(backend *cogitodevv1alpha1.LLMBackend) error {
 		return fmt.Errorf("workload mode cannot be combined with deprecated deploymentRef, serviceRef, containerName, or port")
 	}
 	workload := backend.Spec.Workload
+	if backend.Spec.Capacity == nil || backend.Spec.Capacity.GPUs < 1 {
+		return fmt.Errorf("workload mode requires capacity.gpus")
+	}
 	if workload.ContainerName == "" || workload.Service.Port == 0 {
 		return fmt.Errorf("workload.containerName and workload.service.port are required")
 	}
@@ -47,6 +51,16 @@ func validateBackend(backend *cogitodevv1alpha1.LLMBackend) error {
 			count++
 			if len(container.Args) != 0 {
 				return fmt.Errorf("runtime container %q must not set args; LLMModel supplies model-specific runtime arguments", container.Name)
+			}
+			resourceName := corev1.ResourceName(backend.Spec.Capacity.ResourceName)
+			if resourceName == "" {
+				resourceName = corev1.ResourceName("nvidia.com/gpu")
+			}
+			want := backend.Spec.Capacity.GPUs
+			request := container.Resources.Requests[resourceName]
+			limit := container.Resources.Limits[resourceName]
+			if request.Value() != int64(want) || limit.Value() != int64(want) {
+				return fmt.Errorf("runtime container %q GPU request and limit for %q must both equal capacity.gpus=%d", container.Name, resourceName, want)
 			}
 		}
 	}

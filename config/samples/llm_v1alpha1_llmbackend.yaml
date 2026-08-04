@@ -5,6 +5,7 @@ metadata:
   namespace: llm
 spec:
   type: vllm
+  capacity: {gpus: 2}
   workload:
     containerName: runtime
     service:
@@ -38,6 +39,7 @@ metadata:
   namespace: llm
 spec:
   type: llama-cpp
+  capacity: {gpus: 2}
   workload:
     containerName: runtime
     service:

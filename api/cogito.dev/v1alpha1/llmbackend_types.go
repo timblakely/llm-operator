@@ -52,6 +52,11 @@ type LLMBackendSpec struct {
 	// Type is the backend runtime: "vllm", "sglang", or "llama-cpp".
 	Type BackendType `json:"type"`
 
+	// Capacity is the normalized accelerator requirement used for placement
+	// decisions. In workload mode it must match the runtime container's GPU
+	// request and limit.
+	Capacity *BackendCapacitySpec `json:"capacity,omitempty"`
+
 	// Workload declares the complete serving workload. The operator creates and
 	// owns the Deployment and Service from this template. During migration, this
 	// is mutually exclusive with the deprecated reference fields below.
@@ -80,6 +85,18 @@ type LLMBackendSpec struct {
 
 	// GPU resources required by this backend.
 	GPUResources *GPUResourceRequirements `json:"gpuResources,omitempty"`
+}
+
+// BackendCapacitySpec declares the accelerator capacity consumed by a backend.
+// +kubebuilder:object:generate=true
+type BackendCapacitySpec struct {
+	// GPUs is the number of GPUs required while the backend is running.
+	// +kubebuilder:validation:Minimum=1
+	GPUs int32 `json:"gpus"`
+
+	// ResourceName is the extended resource used by the runtime container.
+	// It defaults to nvidia.com/gpu.
+	ResourceName string `json:"resourceName,omitempty"`
 }
 
 // BackendWorkloadSpec is the complete Kubernetes workload owned by an
