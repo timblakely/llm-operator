@@ -8,12 +8,17 @@ import (
 	admission "sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	cogitodevv1alpha1 "github.com/timblakely/llm-operator/api/cogito.dev/v1alpha1"
+	cogitodevv1beta1 "github.com/timblakely/llm-operator/api/cogito.dev/v1beta1"
 )
 
 // LLMBackendValidator enforces the ownership boundary between a backend's
 // workload baseline and the model arguments injected by the transition
 // controller.
 type LLMBackendValidator struct{}
+
+// LLMBackendV1Beta1Validator applies the workload ownership checks to the
+// breaking API version. Its type cannot carry reference-mode fields.
+type LLMBackendV1Beta1Validator struct{}
 
 func (LLMBackendValidator) ValidateCreate(_ context.Context, backend *cogitodevv1alpha1.LLMBackend) (admission.Warnings, error) {
 	return nil, validateBackend(backend)
@@ -25,6 +30,29 @@ func (LLMBackendValidator) ValidateUpdate(_ context.Context, _ *cogitodevv1alpha
 
 func (LLMBackendValidator) ValidateDelete(context.Context, *cogitodevv1alpha1.LLMBackend) (admission.Warnings, error) {
 	return nil, nil
+}
+
+func (LLMBackendV1Beta1Validator) ValidateCreate(_ context.Context, backend *cogitodevv1beta1.LLMBackend) (admission.Warnings, error) {
+	return nil, validateV1Beta1Backend(backend)
+}
+
+func (LLMBackendV1Beta1Validator) ValidateUpdate(_ context.Context, _ *cogitodevv1beta1.LLMBackend, backend *cogitodevv1beta1.LLMBackend) (admission.Warnings, error) {
+	return nil, validateV1Beta1Backend(backend)
+}
+
+func (LLMBackendV1Beta1Validator) ValidateDelete(context.Context, *cogitodevv1beta1.LLMBackend) (admission.Warnings, error) {
+	return nil, nil
+}
+
+func validateV1Beta1Backend(backend *cogitodevv1beta1.LLMBackend) error {
+	return validateBackend(&cogitodevv1alpha1.LLMBackend{
+		ObjectMeta: backend.ObjectMeta,
+		Spec: cogitodevv1alpha1.LLMBackendSpec{
+			Type:     backend.Spec.Type,
+			Capacity: backend.Spec.Capacity,
+			Workload: backend.Spec.Workload,
+		},
+	})
 }
 
 func validateBackend(backend *cogitodevv1alpha1.LLMBackend) error {

@@ -27,7 +27,9 @@ func TestCRDSchemasAreValid(t *testing.T) {
 		file := file
 		t.Run(filepath.Base(file), func(t *testing.T) {
 			external := readCRD(t, file)
-			if len(external.Spec.Versions) != 1 || external.Spec.Versions[0].Name != "v1alpha1" {
+			if file == "llm.cogito.dev_llmbackends.yaml" {
+				assertBackendVersions(t, external)
+			} else if len(external.Spec.Versions) != 1 || external.Spec.Versions[0].Name != "v1alpha1" {
 				t.Fatalf("CRD API versions = %#v, want exactly v1alpha1", external.Spec.Versions)
 			}
 			internal := &apiextensions.CustomResourceDefinition{}
@@ -49,12 +51,14 @@ func TestCRDSchemasAreValid(t *testing.T) {
 
 func TestBackendSchemasExposeSGLang(t *testing.T) {
 	tests := []struct {
-		file string
-		path []string
+		file    string
+		version string
+		path    []string
 	}{
 		{
-			file: "llm.cogito.dev_llmbackends.yaml",
-			path: []string{"spec", "type"},
+			file:    "llm.cogito.dev_llmbackends.yaml",
+			version: "v1beta1",
+			path:    []string{"type"},
 		},
 		{
 			file: "llm.cogito.dev_llmmodels.yaml",
@@ -64,11 +68,39 @@ func TestBackendSchemasExposeSGLang(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.file, func(t *testing.T) {
-			schema := schemaAt(t, readCRD(t, tt.file), tt.path...)
+			crd := readCRD(t, tt.file)
+			var schema *apiextensionsv1.JSONSchemaProps
+			if tt.version != "" {
+				schema = backendVersionSchema(t, crd, tt.version)
+				for _, component := range tt.path {
+					next, ok := schema.Properties[component]
+					if !ok {
+						t.Fatalf("CRD %s schema is missing %s", crd.Name, fmt.Sprintf("%v", tt.path))
+					}
+					schema = &next
+				}
+			} else {
+				schema = schemaAt(t, crd, tt.path...)
+			}
 			if !enumContains(schema, "sglang") {
 				t.Fatalf("schema at %v does not allow sglang", tt.path)
 			}
 		})
+	}
+}
+
+func TestV1Beta1BackendSchemaRequiresWorkloadOnlyFields(t *testing.T) {
+	crd := readCRD(t, "llm.cogito.dev_llmbackends.yaml")
+	schema := backendVersionSchema(t, crd, "v1beta1")
+	for _, required := range []string{"type", "capacity", "workload"} {
+		if !containsString(schema.Required, required) {
+			t.Fatalf("v1beta1 spec.required = %v, missing %q", schema.Required, required)
+		}
+	}
+	for _, removed := range []string{"deploymentRef", "serviceRef", "containerName", "port", "runtimeClassName", "gpuResources"} {
+		if _, found := schema.Properties[removed]; found {
+			t.Fatalf("v1beta1 spec still exposes removed reference-mode field %q", removed)
+		}
 	}
 }
 
@@ -122,6 +154,37 @@ func schemaAt(t *testing.T, crd *apiextensionsv1.CustomResourceDefinition, path 
 		schema = &next
 	}
 	return schema
+}
+
+func assertBackendVersions(t *testing.T, crd *apiextensionsv1.CustomResourceDefinition) {
+	t.Helper()
+	if len(crd.Spec.Versions) != 2 || crd.Spec.Versions[0].Name != "v1alpha1" || crd.Spec.Versions[1].Name != "v1beta1" || crd.Spec.Versions[0].Storage || !crd.Spec.Versions[1].Storage {
+		t.Fatalf("backend CRD API versions = %#v, want served v1alpha1 and storage v1beta1", crd.Spec.Versions)
+	}
+}
+
+func backendVersionSchema(t *testing.T, crd *apiextensionsv1.CustomResourceDefinition, version string) *apiextensionsv1.JSONSchemaProps {
+	t.Helper()
+	for _, candidate := range crd.Spec.Versions {
+		if candidate.Name == version && candidate.Schema != nil && candidate.Schema.OpenAPIV3Schema != nil {
+			spec, found := candidate.Schema.OpenAPIV3Schema.Properties["spec"]
+			if !found {
+				t.Fatalf("CRD %s version %s has no spec schema", crd.Name, version)
+			}
+			return &spec
+		}
+	}
+	t.Fatalf("CRD %s has no schema for %s", crd.Name, version)
+	return nil
+}
+
+func containsString(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
 }
 
 func enumContains(schema *apiextensionsv1.JSONSchemaProps, expected string) bool {

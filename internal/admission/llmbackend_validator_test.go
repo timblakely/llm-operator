@@ -10,6 +10,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	cogitodevv1alpha1 "github.com/timblakely/llm-operator/api/cogito.dev/v1alpha1"
+	cogitodevv1beta1 "github.com/timblakely/llm-operator/api/cogito.dev/v1beta1"
 )
 
 func TestLLMBackendValidator(t *testing.T) {
@@ -35,6 +36,25 @@ func TestLLMBackendValidator(t *testing.T) {
 	missing.Spec.Workload.ContainerName = "missing"
 	if _, err := validator.ValidateCreate(context.Background(), missing); err == nil || !strings.Contains(err.Error(), "exactly one") {
 		t.Fatalf("container error = %v", err)
+	}
+}
+
+func TestLLMBackendV1Beta1Validator(t *testing.T) {
+	alpha := workloadBackend()
+	beta := &cogitodevv1beta1.LLMBackend{
+		ObjectMeta: alpha.ObjectMeta,
+		Spec: cogitodevv1beta1.LLMBackendSpec{
+			Type:     alpha.Spec.Type,
+			Capacity: alpha.Spec.Capacity,
+			Workload: alpha.Spec.Workload,
+		},
+	}
+	if _, err := (LLMBackendV1Beta1Validator{}).ValidateCreate(context.Background(), beta); err != nil {
+		t.Fatalf("valid v1beta1 workload backend: %v", err)
+	}
+	beta.Spec.Capacity = nil
+	if _, err := (LLMBackendV1Beta1Validator{}).ValidateCreate(context.Background(), beta); err == nil || !strings.Contains(err.Error(), "requires capacity.gpus") {
+		t.Fatalf("missing capacity error = %v", err)
 	}
 }
 

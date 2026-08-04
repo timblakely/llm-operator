@@ -205,3 +205,7 @@ type LLMBackendList struct {
 func init() {
 	SchemeBuilder.Register(&LLMBackend{}, &LLMBackendList{})
 }
+
+// Hub marks v1alpha1 as the conversion hub while both API versions are served.
+// v1beta1 is intentionally a strict workload-only projection of this type.
+func (*LLMBackend) Hub() {}

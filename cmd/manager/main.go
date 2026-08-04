@@ -31,6 +31,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	cogitodevv1alpha1 "github.com/timblakely/llm-operator/api/cogito.dev/v1alpha1"
+	cogitodevv1beta1 "github.com/timblakely/llm-operator/api/cogito.dev/v1beta1"
 	operatoradmission "github.com/timblakely/llm-operator/internal/admission"
 	"github.com/timblakely/llm-operator/internal/controller"
 	"github.com/timblakely/llm-operator/internal/metrics"
@@ -44,6 +45,7 @@ var (
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(cogitodevv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(cogitodevv1beta1.AddToScheme(scheme))
 	metrics.Register()
 }
 
@@ -130,6 +132,12 @@ func main() {
 			WithValidator(operatoradmission.LLMBackendValidator{}).
 			Complete(); err != nil {
 			setupLog.Error(err, "unable to create validating webhook", "webhook", "LLMBackend")
+			os.Exit(1)
+		}
+		if err := ctrl.NewWebhookManagedBy(mgr, &cogitodevv1beta1.LLMBackend{}).
+			WithValidator(operatoradmission.LLMBackendV1Beta1Validator{}).
+			Complete(); err != nil {
+			setupLog.Error(err, "unable to create validating webhook", "webhook", "LLMBackend", "version", "v1beta1")
 			os.Exit(1)
 		}
 	}

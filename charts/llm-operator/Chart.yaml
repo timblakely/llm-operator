@@ -2,8 +2,8 @@ apiVersion: v2
 name: llm-operator
 description: Kubernetes operator for LLM serving backends
 type: application
-version: 0.1.16
-appVersion: "0.1.16"
+version: 0.1.17
+appVersion: "0.1.17"
 kubeVersion: ">=1.28.0-0"
 home: https://github.com/timblakely/llm-operator
 sources:
@@ -21,4 +21,7 @@ annotations:
       name: llmactivemodels.llm.cogito.dev
     - kind: LLMBackend
       version: v1alpha1
+      name: llmbackends.llm.cogito.dev
+    - kind: LLMBackend
+      version: v1beta1
       name: llmbackends.llm.cogito.dev

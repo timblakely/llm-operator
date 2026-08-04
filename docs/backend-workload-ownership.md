@@ -40,9 +40,11 @@ active models.
 
 ## API shape
 
-The initial compatible API adds `spec.workload` to `v1alpha1` and deprecates
-reference mode.  Exactly one mode is valid during migration.  `v1beta1` will
-require `workload` and remove the three reference fields altogether.
+The initial compatible API added `spec.workload` to `v1alpha1` and deprecated
+reference mode. Exactly one mode is valid during migration. `v1beta1` now
+requires `workload` and `capacity`, and removes the reference-mode fields
+(`deploymentRef`, `serviceRef`, `containerName`, `port`, `runtimeClassName`,
+and `gpuResources`) altogether.
 
 ```yaml
 apiVersion: llm.cogito.dev/v1alpha1
@@ -141,8 +143,41 @@ until the CR-created workloads have been accepted.
 5. Remove the three backend HelmRelease directories and their Flux entries
    only after all live `LLMBackend` objects are workload mode and the operator
    has completed a transition among them.
-6. Publish `v1beta1`, make `spec.workload` required, remove reference mode,
-   and add a conversion/migration procedure before retiring `v1alpha1`.
+6. Publish `v1beta1` only after the preflight below succeeds. It makes
+   `spec.workload` and `spec.capacity` required and removes reference mode.
+   Keep `v1alpha1` served while clients and stored-object bookkeeping migrate.
+
+## `v1beta1` staged API migration
+
+The CRD serves `v1alpha1` and `v1beta1`; `v1beta1` is the storage version.
+The operator continues to reconcile the compatible `v1alpha1` representation,
+so a staged CRD update does not recreate generated children. `v1beta1` is a
+strict field-subset of workload-mode `v1alpha1`, so the CRD uses Kubernetes'
+structural `None` conversion. The in-process conversion guard rejects a
+reference-mode object rather than silently dropping its fields.
+
+Do not roll out the generated CRD merely because this source exists. Before
+publishing it, record an inventory from the trusted Cogito kubeconfig and
+confirm that every backend is workload mode with explicit capacity:
+
+```bash
+KUBECONFIG=/home/tim/git/cogito/kubeconfig \
+  kubectl -n llm get llmbackends.llm.cogito.dev -o json
+```
+
+For every object, `spec.workload` and `spec.capacity.gpus` must be present;
+none may contain a reference-mode field. Also retain the rendered inventory
+with the release record. If any legacy object remains, stop: update it through
+the compatible `v1alpha1` workflow, accept the controller-owned replacement,
+and run the inventory again. Never edit a reference-mode object through the
+`v1beta1` endpoint.
+
+After the CRD release, verify `status.storedVersions` has recorded both
+versions during the transition, the operator continues reconciling existing
+children, and a proxy acceptance finishes Stable without recreating or
+adopting a former Helm child. Retire `v1alpha1` only in a later reviewed
+release once no supported client needs it and the stored-version migration is
+complete.
 
 The existing shared cache-manager remains a separate operator-adjacent
 workload in this redesign.  It is infrastructure rather than a model-serving

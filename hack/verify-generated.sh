@@ -9,10 +9,12 @@ trap 'rm -rf "${tmp_dir}"' EXIT
 
 cd "${root_dir}"
 
-"${controller_gen}" \
-  object:headerFile="hack/boilerplate.go.txt",year=2025 \
-  paths="./api/..." \
-  output:dir="${tmp_dir}/object"
+for api_version in v1alpha1 v1beta1; do
+  "${controller_gen}" \
+    object:headerFile="hack/boilerplate.go.txt",year=2025 \
+    paths="./api/cogito.dev/${api_version}" \
+    output:dir="${tmp_dir}/object/${api_version}"
+done
 "${controller_gen}" \
   crd \
   paths="./api/..." \
@@ -32,9 +34,11 @@ compare_file() {
   fi
 }
 
-compare_file \
-  "api/cogito.dev/v1alpha1/zz_generated.deepcopy.go" \
-  "${tmp_dir}/object/zz_generated.deepcopy.go"
+for api_version in v1alpha1 v1beta1; do
+  compare_file \
+    "api/cogito.dev/${api_version}/zz_generated.deepcopy.go" \
+    "${tmp_dir}/object/${api_version}/zz_generated.deepcopy.go"
+done
 
 for checked_in in config/crd/llm.cogito.dev_*.yaml; do
   compare_file "${checked_in}" "${tmp_dir}/crd/$(basename "${checked_in}")"
