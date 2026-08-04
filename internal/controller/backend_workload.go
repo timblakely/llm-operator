@@ -147,6 +147,12 @@ func (r *LLMBackendReconciler) ensureBackendWorkload(ctx context.Context, backen
 	}
 	deploymentBefore := deployment.DeepCopy()
 	currentReplicas := deployment.Spec.Replicas
+	// Runtime arguments and transition annotations are owned by
+	// LLMActiveModel. A normal backend reconcile must not revert a generated
+	// workload to its intentionally argument-free template while it is active.
+	if deploymentExists {
+		preserveTransitionRuntime(&deployment.Spec.Template, podTemplate, workload.ContainerName)
+	}
 	deployment.Labels = mergeLabels(deployment.Labels, labels)
 	deployment.Spec = appsv1.DeploymentSpec{
 		Replicas: ptr.To(replicas),
@@ -172,6 +178,32 @@ func (r *LLMBackendReconciler) ensureBackendWorkload(ctx context.Context, backen
 		}
 	}
 	return nil
+}
+
+func preserveTransitionRuntime(current *corev1.PodTemplateSpec, desired *corev1.PodTemplateSpec, containerName string) {
+	for i := range desired.Spec.Containers {
+		if desired.Spec.Containers[i].Name != containerName {
+			continue
+		}
+		for j := range current.Spec.Containers {
+			if current.Spec.Containers[j].Name == containerName {
+				desired.Spec.Containers[i].Args = append([]string(nil), current.Spec.Containers[j].Args...)
+				break
+			}
+		}
+		break
+	}
+	if current.Annotations == nil {
+		return
+	}
+	if desired.Annotations == nil {
+		desired.Annotations = make(map[string]string)
+	}
+	for _, key := range []string{activeModelAnno, switchedAtAnno, chatTemplateAnno} {
+		if value, ok := current.Annotations[key]; ok {
+			desired.Annotations[key] = value
+		}
+	}
 }
 
 func hasContainer(containers []corev1.Container, name string) bool {
