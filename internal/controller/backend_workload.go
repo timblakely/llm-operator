@@ -181,6 +181,7 @@ func (r *LLMBackendReconciler) ensureBackendWorkload(ctx context.Context, backen
 }
 
 func preserveTransitionRuntime(current *corev1.PodTemplateSpec, desired *corev1.PodTemplateSpec, containerName string) {
+	var currentRuntime *corev1.Container
 	for i := range desired.Spec.Containers {
 		if desired.Spec.Containers[i].Name != containerName {
 			continue
@@ -188,10 +189,18 @@ func preserveTransitionRuntime(current *corev1.PodTemplateSpec, desired *corev1.
 		for j := range current.Spec.Containers {
 			if current.Spec.Containers[j].Name == containerName {
 				desired.Spec.Containers[i].Args = append([]string(nil), current.Spec.Containers[j].Args...)
+				currentRuntime = &current.Spec.Containers[j]
 				break
 			}
 		}
 		break
+	}
+	// The active-model controller owns this reserved ConfigMap volume/mount
+	// pair while a model supplies a chat template. Preserve it with the
+	// injected runtime arguments so an ordinary backend reconciliation cannot
+	// leave --chat-template pointing at a nonexistent file.
+	if currentRuntime != nil {
+		preserveChatTemplateMount(current, desired, currentRuntime, containerName)
 	}
 	if current.Annotations == nil {
 		return
@@ -203,6 +212,47 @@ func preserveTransitionRuntime(current *corev1.PodTemplateSpec, desired *corev1.
 		if value, ok := current.Annotations[key]; ok {
 			desired.Annotations[key] = value
 		}
+	}
+}
+
+func preserveChatTemplateMount(current *corev1.PodTemplateSpec, desired *corev1.PodTemplateSpec, currentRuntime *corev1.Container, containerName string) {
+	var currentVolume *corev1.Volume
+	for i := range current.Spec.Volumes {
+		if current.Spec.Volumes[i].Name == chatTemplateVolumeName {
+			currentVolume = &current.Spec.Volumes[i]
+			break
+		}
+	}
+	var currentMount *corev1.VolumeMount
+	for i := range currentRuntime.VolumeMounts {
+		if currentRuntime.VolumeMounts[i].Name == chatTemplateVolumeName {
+			currentMount = &currentRuntime.VolumeMounts[i]
+			break
+		}
+	}
+	if currentVolume == nil || currentMount == nil {
+		return
+	}
+
+	volumes := desired.Spec.Volumes[:0]
+	for _, volume := range desired.Spec.Volumes {
+		if volume.Name != chatTemplateVolumeName {
+			volumes = append(volumes, volume)
+		}
+	}
+	desired.Spec.Volumes = append(volumes, *currentVolume.DeepCopy())
+	for i := range desired.Spec.Containers {
+		if desired.Spec.Containers[i].Name != containerName {
+			continue
+		}
+		mounts := desired.Spec.Containers[i].VolumeMounts[:0]
+		for _, mount := range desired.Spec.Containers[i].VolumeMounts {
+			if mount.Name != chatTemplateVolumeName {
+				mounts = append(mounts, mount)
+			}
+		}
+		desired.Spec.Containers[i].VolumeMounts = append(mounts, *currentMount.DeepCopy())
+		return
 	}
 }
 

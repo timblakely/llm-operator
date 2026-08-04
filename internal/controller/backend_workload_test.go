@@ -74,6 +74,23 @@ func TestLLMBackendWorkloadCreatesOwnedObjectsAndPreservesTransitionReplicas(t *
 
 	one := int32(1)
 	deployment.Spec.Replicas = &one
+	deployment.Spec.Template.Annotations = map[string]string{
+		activeModelAnno:  "Lorbus/Qwen3.6-27B-int4-AutoRound",
+		chatTemplateAnno: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}
+	deployment.Spec.Template.Spec.Containers[0].Args = []string{"--chat-template", chatTemplateMountDir + "/" + chatTemplateMountFile}
+	deployment.Spec.Template.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{
+		Name:      chatTemplateVolumeName,
+		MountPath: chatTemplateMountDir,
+		ReadOnly:  true,
+	}}
+	deployment.Spec.Template.Spec.Volumes = []corev1.Volume{{
+		Name: chatTemplateVolumeName,
+		VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+			LocalObjectReference: corev1.LocalObjectReference{Name: "qwen-template"},
+			Items:                []corev1.KeyToPath{{Key: "chat_template.jinja", Path: chatTemplateMountFile}},
+		}},
+	}}
 	if err := client.Update(context.Background(), &deployment); err != nil {
 		t.Fatal(err)
 	}
@@ -85,5 +102,14 @@ func TestLLMBackendWorkloadCreatesOwnedObjectsAndPreservesTransitionReplicas(t *
 	}
 	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != 1 {
 		t.Fatalf("backend reconcile reset transition replicas to %v", deployment.Spec.Replicas)
+	}
+	if got := deployment.Spec.Template.Spec.Containers[0].Args; len(got) != 2 || got[1] != chatTemplateMountDir+"/"+chatTemplateMountFile {
+		t.Fatalf("backend reconcile dropped injected runtime args: %#v", got)
+	}
+	if len(deployment.Spec.Template.Spec.Volumes) != 1 || deployment.Spec.Template.Spec.Volumes[0].Name != chatTemplateVolumeName {
+		t.Fatalf("backend reconcile dropped injected chat-template volume: %#v", deployment.Spec.Template.Spec.Volumes)
+	}
+	if got := deployment.Spec.Template.Spec.Containers[0].VolumeMounts; len(got) != 1 || got[0].Name != chatTemplateVolumeName || got[0].MountPath != chatTemplateMountDir {
+		t.Fatalf("backend reconcile dropped injected chat-template mount: %#v", got)
 	}
 }
