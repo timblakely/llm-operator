@@ -8885,8 +8885,10 @@ spec:
             x-kubernetes-validations:
             - message: type must be 'vllm', 'sglang', or 'llama-cpp'
               rule: self.type in ['vllm', 'sglang', 'llama-cpp']
-            - message: port must be greater than 0
-              rule: self.port > 0
+            - message: the workload service port or legacy port must be greater than
+                0
+              rule: 'has(self.workload) ? self.workload.service.port > 0 : self.port
+                > 0'
           status:
             description: LLMBackendStatus defines the observed state of LLMBackend.
             properties:

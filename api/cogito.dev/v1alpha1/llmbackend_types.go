@@ -46,7 +46,7 @@ type GPUResourceRequirements struct {
 
 // LLMBackendSpec defines the desired state of LLMBackend.
 // +kubebuilder:validation:XValidation:rule="self.type in ['vllm', 'sglang', 'llama-cpp']",message="type must be 'vllm', 'sglang', or 'llama-cpp'"
-// +kubebuilder:validation:XValidation:rule="self.port > 0",message="port must be greater than 0"
+// +kubebuilder:validation:XValidation:rule="has(self.workload) ? self.workload.service.port > 0 : self.port > 0",message="the workload service port or legacy port must be greater than 0"
 // +kubebuilder:object:generate=true
 type LLMBackendSpec struct {
 	// Type is the backend runtime: "vllm", "sglang", or "llama-cpp".

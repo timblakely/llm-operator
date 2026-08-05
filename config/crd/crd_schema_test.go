@@ -104,6 +104,17 @@ func TestV1Beta1BackendSchemaRequiresWorkloadOnlyFields(t *testing.T) {
 	}
 }
 
+func TestV1Alpha1BackendSchemaAcceptsWorkloadServicePort(t *testing.T) {
+	crd := readCRD(t, "llm.cogito.dev_llmbackends.yaml")
+	schema := backendVersionSchema(t, crd, "v1alpha1")
+	for _, rule := range schema.XValidations {
+		if rule.Rule == "has(self.workload) ? self.workload.service.port > 0 : self.port > 0" {
+			return
+		}
+	}
+	t.Fatalf("v1alpha1 backend schema does not validate workload.service.port: %#v", schema.XValidations)
+}
+
 func TestModelSchemaExposesStructuredParsers(t *testing.T) {
 	crd := readCRD(t, "llm.cogito.dev_llmmodels.yaml")
 	for _, field := range []string{"toolCallParser", "reasoningParser"} {
