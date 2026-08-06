@@ -78,7 +78,7 @@ type LLMBackendSpec struct {
 	// Port is the serving port on the backend container.
 	// Deprecated: in workload mode use workload.service.port.
 	// +kubebuilder:validation:Minimum=1
-	Port int `json:"port"`
+	Port int `json:"port,omitempty"`
 
 	// RuntimeClassName for GPU nodes (e.g. "nvidia").
 	RuntimeClassName string `json:"runtimeClassName,omitempty"`
