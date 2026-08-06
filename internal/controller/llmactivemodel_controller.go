@@ -24,6 +24,7 @@ import (
 	"os"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -328,12 +329,19 @@ func (r *LLMActiveModelReconciler) executeTransition(ctx context.Context, active
 	if err != nil {
 		return r.failTransition(ctx, activeModel, model.Spec.Model.Name, "InvalidCacheConfiguration", "invalid_cache_configuration", err)
 	}
-	if r.CacheManagerURL != "" && cacheRequest != nil {
+	offline, err := r.backendOfflineMode(ctx, backend)
+	if err != nil {
+		return r.failTransition(ctx, activeModel, model.Spec.Model.Name, "OfflineModeInspectionFailed", "offline_mode_inspection_failed", err)
+	}
+	if cacheRequest != nil && r.CacheManagerURL != "" {
 		cacheClient := cache.NewWithHTTPClient(r.CacheManagerURL, r.cacheHTTPClient())
 		result, err := cacheClient.Ensure(transitionCtx, cacheRequest)
 		if err != nil {
 			logger.Error(err, "cache ensure failed")
 			return r.failTransition(ctx, activeModel, model.Spec.Model.Name, "CacheFailed", "cache_failed", err)
+		}
+		if offline && result != cache.CacheHot {
+			return r.failTransition(ctx, activeModel, model.Spec.Model.Name, "OfflineSnapshotUnavailable", "offline_snapshot_unavailable", fmt.Errorf("cache-manager returned %q for offline backend; a hot snapshot is required before startup", result))
 		}
 
 		if err := checkCurrent(); err != nil {
@@ -349,6 +357,8 @@ func (r *LLMActiveModelReconciler) executeTransition(ctx context.Context, active
 			return ctrl.Result{}, err
 		}
 		logger.Info("cache ensure complete", "result", result)
+	} else if offline {
+		return r.failTransition(ctx, activeModel, model.Spec.Model.Name, "OfflineSnapshotUnavailable", "offline_snapshot_unavailable", fmt.Errorf("offline backend requires a hot cache snapshot, but cache materialization is unavailable"))
 	} else if r.CacheManagerURL == "" {
 		logger.Info("cache-manager not configured, skipping cache step")
 	}
@@ -743,6 +753,30 @@ func (r *LLMActiveModelReconciler) cacheHTTPClient() *http.Client {
 	clone := *r.httpClient()
 	clone.Timeout = 0
 	return &clone
+}
+
+// backendOfflineMode reads the live target template so a transition cannot
+// start an offline runtime before its immutable snapshot is hot in the shared
+// cache. This applies to any backend image that opts into HF_HUB_OFFLINE.
+func (r *LLMActiveModelReconciler) backendOfflineMode(ctx context.Context, backend *cogitodevv1alpha1.LLMBackend) (bool, error) {
+	var deployment appsv1.Deployment
+	if err := r.Get(ctx, types.NamespacedName{Name: backendDeploymentName(backend), Namespace: backend.Namespace}, &deployment); err != nil {
+		return false, fmt.Errorf("get target deployment for offline-mode inspection: %w", err)
+	}
+	for _, container := range deployment.Spec.Template.Spec.Containers {
+		if container.Name != backendContainerName(backend) {
+			continue
+		}
+		for _, env := range container.Env {
+			if env.Name == "HF_HUB_OFFLINE" {
+				return strings.EqualFold(strings.TrimSpace(env.Value), "true") || env.Value == "1" || strings.EqualFold(strings.TrimSpace(env.Value), "yes") || strings.EqualFold(strings.TrimSpace(env.Value), "on"), nil
+			}
+		}
+		return false, nil
+	}
+	// activateDeployment reports a missing target container as PatchFailed. Do
+	// not mask that more precise validation error as an offline-mode failure.
+	return false, nil
 }
 
 func (r *LLMActiveModelReconciler) SetupWithManager(mgr ctrl.Manager) error {

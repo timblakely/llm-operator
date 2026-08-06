@@ -64,8 +64,11 @@ spec:
             description: LLMModelSpec defines the desired state of LLMModel.
             properties:
               artifact:
-                description: Artifact download/cache configuration (optional, for
-                  models needing materialization).
+                description: |-
+                  Artifact overrides for model cache materialization. Hub-backed vLLM and
+                  SGLang models derive their immutable snapshot from model.name and
+                  model.revision when this is omitted. Use this for file-layout-specific
+                  artifacts such as GGUF materialization targets and expected file lists.
                 properties:
                   expectedSize:
                     description: ExpectedSize is a human-readable size estimate (e.g.

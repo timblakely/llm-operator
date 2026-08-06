@@ -236,8 +236,8 @@ func TestDriverCacheRequestContracts(t *testing.T) {
 		wantFormat     CacheFormat
 		wantCacheKind  string
 	}{
-		{backend: cogitodevv1alpha1.BackendVLLM, wantRepository: "acme/source", wantFormat: CacheFormatHuggingFace, wantCacheKind: "huggingface-hub"},
-		{backend: cogitodevv1alpha1.BackendSGLang, wantRepository: "acme/source", wantFormat: CacheFormatHuggingFace, wantCacheKind: "huggingface-hub"},
+		{backend: cogitodevv1alpha1.BackendVLLM, wantRepository: "acme/model", wantFormat: CacheFormatHuggingFace, wantCacheKind: "huggingface-hub"},
+		{backend: cogitodevv1alpha1.BackendSGLang, wantRepository: "acme/model", wantFormat: CacheFormatHuggingFace, wantCacheKind: "huggingface-hub"},
 		{backend: cogitodevv1alpha1.BackendLlamaCpp, wantRepository: "acme/gguf", wantFormat: CacheFormatGGUF, wantCacheKind: "huggingface-files"},
 	}
 	for _, tt := range tests {
@@ -265,6 +265,31 @@ func TestDriverCacheRequestContracts(t *testing.T) {
 			}
 			if tt.backend == cogitodevv1alpha1.BackendLlamaCpp && request.Cache.MaterializationTarget != "gguf/acme-model-abc123" {
 				t.Fatalf("cache target = %q", request.Cache.MaterializationTarget)
+			}
+		})
+	}
+}
+
+func TestHubBackendsCacheWithoutArtifactLayout(t *testing.T) {
+	t.Parallel()
+
+	for _, backend := range []cogitodevv1alpha1.BackendType{cogitodevv1alpha1.BackendVLLM, cogitodevv1alpha1.BackendSGLang} {
+		backend := backend
+		t.Run(string(backend), func(t *testing.T) {
+			model := contractModel(backend)
+			model.Spec.Model.Name = "acme/hub-model"
+			model.Spec.Model.Source = "acme/legacy-source-must-not-control-cache"
+			model.Spec.Model.Revision = "deadbeef"
+			driver, err := DefaultRegistry().Driver(backend)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request, err := driver.CacheRequest(model)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if request == nil || request.Cache.RepoID != model.Spec.Model.Name || request.Cache.Revision != "deadbeef" || len(request.Cache.Files) != 0 {
+				t.Fatalf("automatic hub cache request = %#v", request)
 			}
 		})
 	}

@@ -81,6 +81,49 @@ func TestTransitionCacheManagerUnavailable(t *testing.T) {
 	}
 }
 
+func TestOfflineTransitionRequiresHotSnapshotBeforeStartup(t *testing.T) {
+	t.Parallel()
+
+	model := modelFor("target", "acme/target", cogitodevv1alpha1.BackendVLLM)
+	backend := backendFor("vllm", "target-deployment", "vllm", cogitodevv1alpha1.BackendVLLM)
+	deployment := deploymentFor("target-deployment", "vllm", 0, true)
+	deployment.Spec.Template.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "HF_HUB_OFFLINE", Value: "1"}}
+	active := activeFor("active", model.Spec.Model.Name)
+	httpClient := &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path == "/v1/ensure" {
+			response := httpResponse(http.StatusNoContent, "")
+			response.Header.Set("X-LLM-Cache-Result", "cold")
+			return response, nil
+		}
+		return successfulBackendResponse(req), nil
+	})}
+	reconciler, kubeClient := transitionReconciler(t, httpClient, deployment, model, backend, active)
+	reconciler.CacheManagerURL = "http://cache-manager"
+
+	reconcileActive(t, reconciler, active)
+	assertActiveFailure(t, kubeClient, active, "OfflineSnapshotUnavailable")
+
+	var got appsv1.Deployment
+	getObject(t, kubeClient, deployment, &got)
+	if got.Spec.Replicas == nil || *got.Spec.Replicas != 0 {
+		t.Fatalf("offline cache failure changed target replicas to %v", got.Spec.Replicas)
+	}
+}
+
+func TestOfflineTransitionWithoutCacheManagerIsBlocked(t *testing.T) {
+	t.Parallel()
+
+	model := modelFor("target", "acme/target", cogitodevv1alpha1.BackendVLLM)
+	backend := backendFor("vllm", "target-deployment", "vllm", cogitodevv1alpha1.BackendVLLM)
+	deployment := deploymentFor("target-deployment", "vllm", 0, true)
+	deployment.Spec.Template.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "HF_HUB_OFFLINE", Value: "true"}}
+	active := activeFor("active", model.Spec.Model.Name)
+	reconciler, kubeClient := transitionReconciler(t, successHTTPClient(), deployment, model, backend, active)
+
+	reconcileActive(t, reconciler, active)
+	assertActiveFailure(t, kubeClient, active, "OfflineSnapshotUnavailable")
+}
+
 func TestCacheHTTPClientUsesTransitionContextTimeout(t *testing.T) {
 	t.Parallel()
 	reconciler := &LLMActiveModelReconciler{HTTPClient: &http.Client{Timeout: 10 * time.Second}}

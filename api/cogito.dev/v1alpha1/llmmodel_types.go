@@ -55,7 +55,10 @@ type LLMModelSpec struct {
 	// Model identity.
 	Model LLMModelRef `json:"model"`
 
-	// Artifact download/cache configuration (optional, for models needing materialization).
+	// Artifact overrides for model cache materialization. Hub-backed vLLM and
+	// SGLang models derive their immutable snapshot from model.name and
+	// model.revision when this is omitted. Use this for file-layout-specific
+	// artifacts such as GGUF materialization targets and expected file lists.
 	Artifact *ArtifactSpec `json:"artifact,omitempty"`
 
 	// Serving configuration.

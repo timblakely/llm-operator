@@ -274,23 +274,31 @@ func (d runtimeDriver) CollectRuntimeMetadata(ctx context.Context, httpClient HT
 }
 
 func (d runtimeDriver) CacheRequest(model *cogitodevv1alpha1.LLMModel) (*cache.CacheRequest, error) {
-	if model.Spec.Artifact == nil {
-		return nil, nil
-	}
 	if err := d.Validate(model); err != nil {
 		return nil, err
 	}
-	repository := model.Spec.Model.Source
+
+	// Hub-backed runtimes always need an immutable snapshot for an offline
+	// startup. Artifact is deliberately optional there: it supplies only
+	// overrides such as a size estimate or an explicit file layout. File-based
+	// runtimes still require Artifact because their layout is not discoverable.
+	if d.capabilities.CacheFormat != CacheFormatHuggingFace && model.Spec.Artifact == nil {
+		return nil, nil
+	}
+	repository := model.Spec.Model.Name
 	if d.capabilities.CacheFormat == CacheFormatGGUF {
 		repository = model.Spec.Model.ArtifactRepository
 	}
 	cacheSpec := cache.CacheSpec{
-		Kind:                  cacheManagerKind(d.capabilities.CacheFormat),
-		RepoID:                repository,
-		Revision:              model.Spec.Model.Revision,
-		Files:                 append([]string(nil), model.Spec.Artifact.Files...),
-		MaterializationTarget: model.Spec.Artifact.MaterializationTarget,
+		Kind:     cacheManagerKind(d.capabilities.CacheFormat),
+		RepoID:   repository,
+		Revision: model.Spec.Model.Revision,
 	}
+	if model.Spec.Artifact == nil {
+		return &cache.CacheRequest{Model: model.Spec.Model.Name, Backend: string(d.kind), Cache: cacheSpec}, nil
+	}
+	cacheSpec.Files = append([]string(nil), model.Spec.Artifact.Files...)
+	cacheSpec.MaterializationTarget = model.Spec.Artifact.MaterializationTarget
 	if model.Spec.Artifact.ExpectedSize != "" {
 		size, err := parseSize(model.Spec.Artifact.ExpectedSize)
 		if err != nil {
