@@ -1,0 +1,173 @@
+{{- if .Values.proxy.enabled }}
+{{- $proxy := .Values.proxy }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "llm-operator.proxy.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llm-operator.proxy.selectorLabels" . | nindent 4 }}
+  {{- with $proxy.serviceAccount.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "llm-operator.proxy.name" . }}
+  namespace: {{ .Release.Namespace }}
+rules:
+  - apiGroups: ["llm.cogito.dev"]
+    resources: ["llmmodels", "llmmodeloverlays"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["llm.cogito.dev"]
+    resources: ["llmactivemodels"]
+    resourceNames: [{{ required "proxy.activeModelRef is required" $proxy.activeModelRef | quote }}]
+    verbs: ["get", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: [{{ required "proxy.backends.vllm.deployment is required" $proxy.backends.vllm.deployment | quote }}, {{ required "proxy.backends.llamaCPP.deployment is required" $proxy.backends.llamaCPP.deployment | quote }}]
+    verbs: ["get", "watch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["llm-model-status"]
+    verbs: ["create", "get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "llm-operator.proxy.name" . }}
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "llm-operator.proxy.name" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "llm-operator.proxy.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "llm-operator.proxy.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llm-operator.proxy.selectorLabels" . | nindent 4 }}
+spec:
+  replicas: {{ $proxy.replicas }}
+  strategy: {type: Recreate}
+  selector:
+    matchLabels:
+      {{- include "llm-operator.proxy.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "llm-operator.proxy.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "llm-operator.proxy.serviceAccountName" . }}
+      automountServiceAccountToken: true
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: {{ $proxy.terminationGracePeriodSeconds }}
+      {{- with $proxy.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: proxy
+          image: {{ include "llm-operator.proxy.image" . | quote }}
+          imagePullPolicy: {{ $proxy.image.pullPolicy }}
+          securityContext:
+            {{- toYaml $proxy.securityContext | nindent 12 }}
+          env:
+            - name: POD_NAMESPACE
+              valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+            - {name: BACKEND_URL, value: {{ required "proxy.backends.vllm.url is required" $proxy.backends.vllm.url | quote }}}
+            - {name: LLAMA_BACKEND_URL, value: {{ required "proxy.backends.llamaCPP.url is required" $proxy.backends.llamaCPP.url | quote }}}
+            - {name: VLLM_DEPLOYMENT, value: {{ $proxy.backends.vllm.deployment | quote }}}
+            - {name: VLLM_CONTAINER, value: {{ $proxy.backends.vllm.container | quote }}}
+            - {name: LLAMA_DEPLOYMENT, value: {{ $proxy.backends.llamaCPP.deployment | quote }}}
+            - {name: LLAMA_CONTAINER, value: {{ $proxy.backends.llamaCPP.container | quote }}}
+            - {name: DEFAULT_MODEL, value: {{ required "proxy.defaultModel is required" $proxy.defaultModel | quote }}}
+            - {name: PUBLIC_BASE_URL, value: {{ required "proxy.publicBaseURL is required" $proxy.publicBaseURL | quote }}}
+            - {name: TRANSITION_TIMEOUT, value: {{ $proxy.transitionTimeout | quote }}}
+            - {name: ENABLE_DEPLOYMENT_MUTATIONS, value: "false"}
+            {{- with $proxy.cacheManagerURL }}
+            - {name: CACHE_MANAGER_URL, value: {{ . | quote }}}
+            {{- end }}
+          ports: [{name: http, containerPort: {{ $proxy.service.port }}, protocol: TCP}]
+          livenessProbe: {httpGet: {path: /healthz, port: http}}
+          readinessProbe: {httpGet: {path: /readyz, port: http}}
+          resources:
+            {{- toYaml $proxy.resources | nindent 12 }}
+      {{- with $proxy.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $proxy.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $proxy.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "llm-operator.proxy.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llm-operator.proxy.selectorLabels" . | nindent 4 }}
+    {{- with $proxy.service.labels }}{{ toYaml . | nindent 4 }}{{- end }}
+  {{- with $proxy.service.annotations }}
+  annotations: {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  selector:
+    {{- include "llm-operator.proxy.selectorLabels" . | nindent 4 }}
+  ports: [{name: http, port: {{ $proxy.service.port }}, targetPort: http, protocol: TCP}]
+{{- if $proxy.exposure.httpRoute.enabled }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $proxy.exposure.httpRoute.name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  hostnames: {{ required "proxy.exposure.httpRoute.hostnames is required when enabled" $proxy.exposure.httpRoute.hostnames | toYaml | nindent 4 }}
+  parentRefs: {{ required "proxy.exposure.httpRoute.parentRefs is required when enabled" $proxy.exposure.httpRoute.parentRefs | toYaml | nindent 4 }}
+  rules:
+    - backendRefs: [{name: {{ include "llm-operator.proxy.name" . }}, port: {{ $proxy.service.port }}}]
+{{- end }}
+{{- if $proxy.metrics.serviceMonitor.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "llm-operator.proxy.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- toYaml $proxy.metrics.serviceMonitor.labels | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "llm-operator.proxy.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ $proxy.metrics.serviceMonitor.interval | quote }}
+      scrapeTimeout: {{ $proxy.metrics.serviceMonitor.scrapeTimeout | quote }}
+      # Retain Cogito dashboard target-label compatibility while the existing
+      # dashboard remains a separately managed resource.
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_service_name]
+          regex: {{ include "llm-operator.proxy.name" . | quote }}
+          action: keep
+        - sourceLabels: [__meta_kubernetes_service_name]
+          targetLabel: vllm_instance
+        - sourceLabels: [__meta_kubernetes_service_name]
+          regex: {{ include "llm-operator.proxy.name" . | quote }}
+          replacement: proxy
+          targetLabel: controller
+{{- end }}
+{{- end }}

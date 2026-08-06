@@ -44,6 +44,11 @@ metrics:
     port: 8081
     annotations: {}
     labels: {}
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
 
 health:
   bindAddress: ":8082"
@@ -63,6 +68,67 @@ health:
 # CACHE_MANAGER_URL environment variable is omitted when this is empty.
 cacheManager:
   url: ""
+
+# The proxy is an optional data-plane component of this chart. It never shares
+# the manager Pod or service account.
+proxy:
+  enabled: false
+  image:
+    repository: ghcr.io/timblakely/llm-proxy
+    digest: ""
+    pullPolicy: IfNotPresent
+  replicas: 1
+  service:
+    name: llm-proxy
+    port: 8080
+    annotations: {}
+    labels: {}
+  serviceAccount:
+    name: llm
+    annotations: {}
+  resources:
+    requests: {cpu: 25m, memory: 64Mi}
+    limits: {memory: 256Mi}
+  podSecurityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities: {drop: [ALL]}
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    runAsUser: 65532
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  terminationGracePeriodSeconds: 30
+  defaultModel: ""
+  publicBaseURL: ""
+  activeModelRef: default
+  transitionTimeout: 30m
+  cacheManagerURL: ""
+  backends:
+    vllm: {url: "", deployment: "", container: runtime}
+    llamaCPP: {url: "", deployment: "", container: runtime}
+  exposure:
+    httpRoute:
+      enabled: false
+      name: llm
+      hostnames: []
+      parentRefs: []
+  metrics:
+    serviceMonitor:
+      enabled: false
+      interval: 30s
+      scrapeTimeout: 10s
+      labels: {}
+
+backendMetrics:
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
 
 podDisruptionBudget:
   enabled: true

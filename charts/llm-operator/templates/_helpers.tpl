@@ -50,3 +50,23 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- $digest := required "image.digest is required; use a reviewed sha256 digest" .Values.image.digest -}}
 {{- printf "%s@%s" .Values.image.repository $digest -}}
 {{- end }}
+
+{{/* Proxy object names deliberately default to Cogito-compatible names. */}}
+{{- define "llm-operator.proxy.name" -}}
+{{- required "proxy.service.name is required" .Values.proxy.service.name -}}
+{{- end }}
+
+{{- define "llm-operator.proxy.serviceAccountName" -}}
+{{- required "proxy.serviceAccount.name is required" .Values.proxy.serviceAccount.name -}}
+{{- end }}
+
+{{- define "llm-operator.proxy.image" -}}
+{{- $digest := required "proxy.image.digest is required when proxy.enabled=true" .Values.proxy.image.digest -}}
+{{- printf "%s@%s" .Values.proxy.image.repository $digest -}}
+{{- end }}
+
+{{- define "llm-operator.proxy.selectorLabels" -}}
+app.kubernetes.io/controller: proxy
+app.kubernetes.io/instance: llm
+app.kubernetes.io/name: llm
+{{- end }}

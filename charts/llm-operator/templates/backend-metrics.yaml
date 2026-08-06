@@ -1,0 +1,21 @@
+{{- if .Values.backendMetrics.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "llm-operator.fullname" . }}-backends
+  namespace: {{ .Release.Namespace }}
+  labels: {{- toYaml .Values.backendMetrics.serviceMonitor.labels | nindent 4 }}
+spec:
+  selector:
+    matchExpressions:
+      - key: llm.cogito.dev/backend
+        operator: Exists
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.backendMetrics.serviceMonitor.interval | quote }}
+      scrapeTimeout: {{ .Values.backendMetrics.serviceMonitor.scrapeTimeout | quote }}
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_service_label_llm_cogito_dev_backend]
+          targetLabel: backend
+{{- end }}

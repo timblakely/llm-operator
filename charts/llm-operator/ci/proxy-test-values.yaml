@@ -1,0 +1,26 @@
+image:
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+metrics:
+  serviceMonitor:
+    enabled: true
+proxy:
+  enabled: true
+  image:
+    digest: sha256:1111111111111111111111111111111111111111111111111111111111111111
+  defaultModel: test/model
+  publicBaseURL: https://llm-switch.example.test/v1
+  cacheManagerURL: http://cache-manager:8090
+  backends:
+    vllm: {url: http://vllm:8000, deployment: vllm, container: runtime}
+    llamaCPP: {url: http://llama-cpp:8000, deployment: llama-cpp, container: runtime}
+  exposure:
+    httpRoute:
+      enabled: true
+      hostnames: [llm-switch.example.test]
+      parentRefs: [{name: internal, namespace: gateway-system, sectionName: https}]
+  metrics:
+    serviceMonitor:
+      enabled: true
+backendMetrics:
+  serviceMonitor:
+    enabled: true

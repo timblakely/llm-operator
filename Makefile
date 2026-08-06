@@ -1,5 +1,6 @@
 # Image URL for building/deploying
 IMG ?= ghcr.io/timblakely/llm-operator:latest
+PROXY_IMG ?= ghcr.io/timblakely/llm-proxy:latest
 
 # CONTROLLER_GEN version
 CONTROLLER_GEN_VERSION := v0.18.0
@@ -34,11 +35,19 @@ run: manifests generate ## Run controller against the configured Kubernetes clus
 
 .PHONY: docker-build
 docker-build: ## Build Docker image.
-	docker build -t $(IMG) .
+	docker build --target manager -t $(IMG) .
 
 .PHONY: docker-push
 docker-push: ## Push Docker image.
 	docker push $(IMG)
+
+.PHONY: proxy-build
+proxy-build: ## Build the proxy image.
+	docker build --target proxy -t $(PROXY_IMG) .
+
+.PHONY: proxy-push
+proxy-push: ## Push the proxy image.
+	docker push $(PROXY_IMG)
 
 .PHONY: generate
 generate: $(CONTROLLER_GEN) ## Generate deepcopy code.

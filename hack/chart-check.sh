@@ -7,9 +7,11 @@ chart_dir="${root_dir}/charts/llm-operator"
 helm="${HELM:-helm}"
 kube_version="${HELM_KUBE_VERSION:-1.35.0}"
 test_values="${chart_dir}/ci/test-values.yaml"
+proxy_test_values="${chart_dir}/ci/proxy-test-values.yaml"
 rendered="$(mktemp)"
 enabled="$(mktemp)"
-trap 'rm -f "${rendered}" "${enabled}"' EXIT
+proxy_rendered="$(mktemp)"
+trap 'rm -f "${rendered}" "${enabled}" "${proxy_rendered}"' EXIT
 
 status=0
 for source in "${root_dir}"/config/crd/llm.cogito.dev_*.yaml; do
@@ -74,6 +76,25 @@ if [[ "$(grep -c -- '--enable-transitions=true' "${enabled}" || true)" != "1" ]]
 fi
 if [[ "$(grep -c -- 'name: CACHE_MANAGER_URL' "${enabled}" || true)" != "1" ]]; then
   echo "chart check failed: cacheManager.url was not rendered" >&2
+  exit 1
+fi
+
+"${helm}" lint "${chart_dir}" --kube-version "${kube_version}" -f "${proxy_test_values}"
+"${helm}" template llm-operator "${chart_dir}" \
+  --namespace llm \
+  --kube-version "${kube_version}" \
+  -f "${proxy_test_values}" >"${proxy_rendered}"
+
+if [[ "$(grep -c '^kind: Deployment$' "${proxy_rendered}" || true)" != "2" ]]; then
+  echo "chart check failed: enabled proxy render must contain manager and proxy Deployments" >&2
+  exit 1
+fi
+if [[ "$(grep -c 'image: "ghcr.io/timblakely/llm-proxy@sha256:' "${proxy_rendered}" || true)" != "1" ]]; then
+  echo "chart check failed: enabled proxy image is not digest-pinned" >&2
+  exit 1
+fi
+if ! grep -q 'key: llm.cogito.dev/backend' "${proxy_rendered}"; then
+  echo "chart check failed: backend metrics monitor is missing the backend selector" >&2
   exit 1
 fi
 

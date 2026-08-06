@@ -12,18 +12,28 @@ COPY go.sum go.sum
 RUN go mod download
 
 # Copy the go sources
-COPY cmd/manager/main.go cmd/manager/main.go
+COPY cmd/ cmd/
 COPY api/ api/
 COPY internal/ internal/
 
-# Build
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -a -o manager cmd/manager/main.go
+# Build the independently deployed control- and data-plane binaries.
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -a -o manager cmd/manager/main.go \
+    && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -a -o llm-proxy ./cmd/llm-proxy
 
 # Use distroless as minimal base image to package the manager binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
-FROM gcr.io/distroless/static:nonroot
+FROM gcr.io/distroless/static:nonroot AS manager
 WORKDIR /
 COPY --from=builder /workspace/manager .
 USER 65532:65532
 
 ENTRYPOINT ["/manager"]
+
+# The proxy is chart-packaged with the operator, but remains an independent
+# request-serving process and image.
+FROM gcr.io/distroless/static:nonroot AS proxy
+WORKDIR /
+COPY --from=builder /workspace/llm-proxy .
+USER 65532:65532
+
+ENTRYPOINT ["/llm-proxy"]
