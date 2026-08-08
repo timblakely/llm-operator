@@ -60,6 +60,11 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- required "proxy.serviceAccount.name is required" .Values.proxy.serviceAccount.name -}}
 {{- end }}
 
+{{/* Cogito historically uses one namespaced RBAC object per proxy identity. */}}
+{{- define "llm-operator.proxy.rbacName" -}}
+{{- include "llm-operator.proxy.serviceAccountName" . -}}
+{{- end }}
+
 {{- define "llm-operator.proxy.image" -}}
 {{- $digest := required "proxy.image.digest is required when proxy.enabled=true" .Values.proxy.image.digest -}}
 {{- printf "%s@%s" .Values.proxy.image.repository $digest -}}
