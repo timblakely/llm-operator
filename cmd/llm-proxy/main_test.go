@@ -509,6 +509,44 @@ func TestModelCardPrefersRuntimeMetadata(t *testing.T) {
 	}
 }
 
+func TestModelCardInfersImageInputFromLlamaProjector(t *testing.T) {
+	for _, args := range [][]string{{"--mmproj", "/models/muse/mmproj.gguf"}, {"--mmproj-url=https://models.example/mmproj.gguf"}} {
+		cfg := modelConfig{Name: "muse", Backend: "llama-cpp", Args: args}
+		metadata := modelCard(cfg)["metadata"].(map[string]any)
+		modalities, ok := metadata["input_modalities"].([]string)
+		if !ok || strings.Join(modalities, ",") != "text,image" {
+			t.Fatalf("input modalities = %#v, want [text image]", metadata["input_modalities"])
+		}
+	}
+}
+
+func TestModelCardInfersImageInputFromModelConfigMetadata(t *testing.T) {
+	cfg := modelConfig{Name: "gemma", Backend: "vllm", Fallback: json.RawMessage(`{"input_modalities":["text","image"]}`)}
+	metadata := modelCard(cfg)["metadata"].(map[string]any)
+	modalities, ok := metadata["input_modalities"].([]string)
+	if !ok || strings.Join(modalities, ",") != "text,image" {
+		t.Fatalf("input modalities = %#v, want [text image]", metadata["input_modalities"])
+	}
+}
+
+func TestModelConfigSupportsImageInput(t *testing.T) {
+	if !modelConfigSupportsImageInput(map[string]any{"vision_config": map[string]any{"hidden_size": 1024}}) {
+		t.Fatal("vision_config did not enable image input")
+	}
+	if modelConfigSupportsImageInput(map[string]any{"model_type": "llama"}) {
+		t.Fatal("text-only config incorrectly enabled image input")
+	}
+}
+
+func TestModelConfigInputModalities(t *testing.T) {
+	if got := strings.Join(modelConfigInputModalities(map[string]any{"visual": map[string]any{}}), ","); got != "text,image" {
+		t.Fatalf("vision model modalities = %q, want text,image", got)
+	}
+	if got := strings.Join(modelConfigInputModalities(map[string]any{"model_type": "llama"}), ","); got != "text" {
+		t.Fatalf("text model modalities = %q, want text", got)
+	}
+}
+
 func TestHermesConfigEndpointUsesActiveModel(t *testing.T) {
 	p := &proxy{registry: registry{models: map[string]modelConfig{
 		"gemma": {Name: "gemma", MaxModelLen: 32768, Created: time.Unix(1, 0)},

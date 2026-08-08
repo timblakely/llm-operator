@@ -158,6 +158,9 @@ type proxy struct {
 	cacheExternal atomic.Uint64
 	lastSwitch    atomic.Int64 // nanoseconds
 	lastStart     atomic.Int64 // nanoseconds
+
+	capabilityMu        sync.Mutex
+	capabilityDiscovery map[string]bool
 }
 
 func main() {
@@ -777,32 +780,46 @@ func runGenerateConfig(args []string, output io.Writer) error {
 }
 
 func fetchModelContext(ctx context.Context, client *http.Client, repo, revision string) (int, error) {
-	parts := strings.Split(repo, "/")
-	url := "https://huggingface.co/" + parts[0] + "/" + parts[1] + "/raw/" + url.PathEscape(revision) + "/config.json"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	config, err := fetchModelConfig(ctx, client, repo, revision)
 	if err != nil {
 		return 0, err
-	}
-	req.Header.Set("User-Agent", "vllm-proxy-config-generator/1")
-	resp, err := client.Do(req)
-	if err != nil {
-		return 0, fmt.Errorf("fetch model config: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("fetch model config: Hugging Face returned %s", resp.Status)
-	}
-	decoder := json.NewDecoder(io.LimitReader(resp.Body, 1<<20))
-	decoder.UseNumber()
-	var config map[string]any
-	if err := decoder.Decode(&config); err != nil {
-		return 0, fmt.Errorf("decode model config: %w", err)
 	}
 	contextLength, ok := modelContextLength(config)
 	if !ok {
 		return 0, errors.New("model config does not expose a recognized context-length field; pass a manual profile instead")
 	}
 	return contextLength, nil
+}
+
+// fetchModelConfig retrieves the model's own immutable Hugging Face
+// configuration. Callers derive observable catalog metadata from it rather
+// than duplicating model capabilities in an LLMModel CR.
+func fetchModelConfig(ctx context.Context, client *http.Client, repo, revision string) (map[string]any, error) {
+	parts := strings.Split(repo, "/")
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return nil, errors.New("model repository must be OWNER/MODEL")
+	}
+	url := "https://huggingface.co/" + parts[0] + "/" + parts[1] + "/raw/" + url.PathEscape(revision) + "/config.json"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "vllm-proxy-config-generator/1")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch model config: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("fetch model config: Hugging Face returned %s", resp.Status)
+	}
+	decoder := json.NewDecoder(io.LimitReader(resp.Body, 1<<20))
+	decoder.UseNumber()
+	var config map[string]any
+	if err := decoder.Decode(&config); err != nil {
+		return nil, fmt.Errorf("decode model config: %w", err)
+	}
+	return config, nil
 }
 
 func fetchModelParameters(ctx context.Context, client *http.Client, repo string) (int64, error) {
@@ -1168,6 +1185,9 @@ func (p *proxy) refresh(ctx context.Context) error {
 			return fmt.Errorf("persist active runtime metadata: %w", err)
 		}
 	}
+	for _, cfg := range next.models {
+		p.scheduleModelCapabilityDiscovery(cfg)
+	}
 	return nil
 }
 
@@ -1403,6 +1423,9 @@ func modelCard(cfg modelConfig) map[string]any {
 	}
 	mergeJSONMetadata(metadata, cfg.Fallback)
 	mergeJSONMetadata(metadata, cfg.Runtime)
+	// This is observed from the model artifact or its actual runtime arguments;
+	// it is intentionally not a user-declared CRD capability.
+	metadata["input_modalities"] = inputModalities(cfg)
 	card["metadata"] = metadata
 	return card
 }
@@ -1423,8 +1446,50 @@ func overlayModelCard(overlay overlayConfig, base modelConfig) map[string]any {
 	// Overlay identity must not be masked by base model metadata.
 	metadata["overlay"] = true
 	metadata["base_model"] = overlay.BaseModel
+	metadata["input_modalities"] = inputModalities(base)
 	card["metadata"] = metadata
 	return card
+}
+
+// inputModalities infers client-visible inputs from evidence the proxy owns.
+// llama.cpp only accepts OpenAI image content when started with a multimodal
+// projector; Hugging Face runtimes expose the same fact through config.json,
+// cached as model-card metadata. Unknown models conservatively remain text-only.
+func inputModalities(cfg modelConfig) []string {
+	if cfg.Backend == "llama-cpp" && (hasArgument(cfg.Args, "--mmproj") || hasArgument(cfg.Args, "--mmproj-url")) {
+		return []string{"text", "image"}
+	}
+	if modalities, known := metadataInputModalities(cfg.Fallback); known {
+		return modalities
+	}
+	if modalities, known := metadataInputModalities(cfg.Runtime); known {
+		return modalities
+	}
+	return []string{"text"}
+}
+
+func hasArgument(args []string, flag string) bool {
+	for _, arg := range args {
+		if arg == flag || strings.HasPrefix(arg, flag+"=") {
+			return true
+		}
+	}
+	return false
+}
+
+func metadataInputModalities(raw json.RawMessage) ([]string, bool) {
+	var metadata struct {
+		InputModalities []string `json:"input_modalities"`
+	}
+	if json.Unmarshal(raw, &metadata) != nil || len(metadata.InputModalities) == 0 {
+		return nil, false
+	}
+	for _, modality := range metadata.InputModalities {
+		if modality == "image" {
+			return []string{"text", "image"}, true
+		}
+	}
+	return []string{"text"}, true
 }
 
 func mergeJSONMetadata(destination map[string]any, raw json.RawMessage) {
@@ -1878,14 +1943,114 @@ func (p *proxy) modelCardFallback(ctx context.Context, cfg modelConfig) (string,
 		return "", errors.New("model repository is not OWNER/MODEL")
 	}
 	metadata := map[string]any{"source": "huggingface", "model_max_context": cfg.MaxModelLen}
-	if declared, err := fetchModelContext(ctx, p.httpClient, repo, "main"); err == nil {
-		metadata["model_max_context"] = declared
+	revision := cfg.Cache.Revision
+	if revision == "" {
+		revision = "main"
+	}
+	if config, err := fetchModelConfig(ctx, p.httpClient, repo, revision); err == nil {
+		if declared, ok := modelContextLength(config); ok {
+			metadata["model_max_context"] = declared
+		}
+		metadata["input_modalities"] = modelConfigInputModalities(config)
 	}
 	if parameters, err := fetchModelParameters(ctx, p.httpClient, repo); err == nil && parameters > 0 {
 		metadata["total_parameters"] = parameters
 	}
 	body, err := json.Marshal(metadata)
 	return string(body), err
+}
+
+// scheduleModelCapabilityDiscovery fills absent model-card capability metadata
+// from the immutable artifact without delaying Kubernetes catalog refreshes or
+// an OpenAI /v1/models request. The in-flight guard prevents watch events from
+// making duplicate Hugging Face requests for the same model.
+func (p *proxy) scheduleModelCapabilityDiscovery(cfg modelConfig) {
+	if p.httpClient == nil || cfg.Backend == "llama-cpp" || len(strings.Split(cfg.ModelSource, "/")) != 2 {
+		return
+	}
+	if _, known := metadataInputModalities(cfg.Fallback); known {
+		return
+	}
+	p.capabilityMu.Lock()
+	if p.capabilityDiscovery == nil {
+		p.capabilityDiscovery = make(map[string]bool)
+	}
+	if p.capabilityDiscovery[cfg.Source] {
+		p.capabilityMu.Unlock()
+		return
+	}
+	p.capabilityDiscovery[cfg.Source] = true
+	p.capabilityMu.Unlock()
+
+	go func() {
+		defer func() {
+			p.capabilityMu.Lock()
+			delete(p.capabilityDiscovery, cfg.Source)
+			p.capabilityMu.Unlock()
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		metadata, err := p.modelCardFallback(ctx, cfg)
+		if err != nil {
+			return
+		}
+		if err := p.persistModelCardMetadata(ctx, cfg, metadata); err != nil {
+			return
+		}
+	}()
+}
+
+func (p *proxy) persistModelCardMetadata(ctx context.Context, cfg modelConfig, metadata string) error {
+	key := statusDataKey(cfg.Source, ".model_card_metadata.json")
+	status, err := p.client.CoreV1().ConfigMaps(p.namespace).Get(ctx, modelStatusName, metav1.GetOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("read model status ConfigMap: %w", err)
+	}
+	if apierrors.IsNotFound(err) || status == nil {
+		status = &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: modelStatusName, Namespace: p.namespace, Labels: map[string]string{"llm.cogito.dev/model-status": "true"}}, Data: map[string]string{key: metadata}}
+		if _, err := p.client.CoreV1().ConfigMaps(p.namespace).Create(ctx, status, metav1.CreateOptions{}); err != nil {
+			return fmt.Errorf("create model status ConfigMap: %w", err)
+		}
+	} else {
+		patch, err := json.Marshal(map[string]any{"data": map[string]string{key: metadata}})
+		if err != nil {
+			return err
+		}
+		if _, err := p.client.CoreV1().ConfigMaps(p.namespace).Patch(ctx, modelStatusName, types.MergePatchType, patch, metav1.PatchOptions{FieldManager: "vllm-proxy"}); err != nil {
+			return fmt.Errorf("persist model-card metadata: %w", err)
+		}
+	}
+	p.stateMu.Lock()
+	if current, ok := p.registry.models[cfg.Name]; ok && current.Source == cfg.Source {
+		current.Fallback = json.RawMessage(metadata)
+		p.registry.models[cfg.Name] = current
+	}
+	p.stateMu.Unlock()
+	return nil
+}
+
+func modelConfigInputModalities(config map[string]any) []string {
+	if modelConfigSupportsImageInput(config) {
+		return []string{"text", "image"}
+	}
+	return []string{"text"}
+}
+
+// modelConfigSupportsImageInput detects the standard multimodal fields stored
+// in a model's own Hugging Face config.json. The fields are intentionally
+// structural rather than model-name allowlists so new vision architectures do
+// not require a proxy or CRD capability update.
+func modelConfigSupportsImageInput(config map[string]any) bool {
+	for _, key := range []string{
+		"vision_config", "vision_tower", "mm_vision_tower", "vision_encoder",
+		"vision_model", "visual", "image_token_id", "image_token_index",
+		"image_seq_length", "image_size", "image_grid_pinpoints", "mm_projector_type",
+	} {
+		if value, found := config[key]; found && value != nil {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *proxy) collectRuntimeMetadata(ctx context.Context, cfg modelConfig) (runtimeMetadata, error) {
