@@ -75,3 +75,8 @@ app.kubernetes.io/controller: proxy
 app.kubernetes.io/instance: llm
 app.kubernetes.io/name: llm
 {{- end }}
+
+{{- define "llm-operator.proxy.ownershipAnnotations" -}}
+meta.helm.sh/release-name: {{ .Release.Name }}
+meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+{{- end }}

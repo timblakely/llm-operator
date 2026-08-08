@@ -7,10 +7,12 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "llm-operator.proxy.selectorLabels" . | nindent 4 }}
-  {{- with $proxy.serviceAccount.annotations }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
   annotations:
+    {{- include "llm-operator.proxy.ownershipAnnotations" . | nindent 4 }}
+    {{- with $proxy.serviceAccount.annotations }}
     {{- toYaml . | nindent 4 }}
-  {{- end }}
+    {{- end }}
 automountServiceAccountToken: true
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -18,6 +20,9 @@ kind: Role
 metadata:
   name: {{ include "llm-operator.proxy.rbacName" . }}
   namespace: {{ .Release.Namespace }}
+  labels: {app.kubernetes.io/managed-by: {{ .Release.Service }}}
+  annotations:
+    {{- include "llm-operator.proxy.ownershipAnnotations" . | nindent 4 }}
 rules:
   - apiGroups: ["llm.cogito.dev"]
     resources: ["llmmodels", "llmmodeloverlays"]
@@ -40,6 +45,9 @@ kind: RoleBinding
 metadata:
   name: {{ include "llm-operator.proxy.rbacName" . }}
   namespace: {{ .Release.Namespace }}
+  labels: {app.kubernetes.io/managed-by: {{ .Release.Service }}}
+  annotations:
+    {{- include "llm-operator.proxy.ownershipAnnotations" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -56,6 +64,9 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "llm-operator.proxy.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+  annotations:
+    {{- include "llm-operator.proxy.ownershipAnnotations" . | nindent 4 }}
 spec:
   replicas: {{ $proxy.replicas }}
   strategy: {type: Recreate}
@@ -120,9 +131,10 @@ metadata:
   labels:
     {{- include "llm-operator.proxy.selectorLabels" . | nindent 4 }}
     {{- with $proxy.service.labels }}{{ toYaml . | nindent 4 }}{{- end }}
-  {{- with $proxy.service.annotations }}
-  annotations: {{- toYaml . | nindent 4 }}
-  {{- end }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+  annotations:
+    {{- include "llm-operator.proxy.ownershipAnnotations" . | nindent 4 }}
+    {{- with $proxy.service.annotations }}{{ toYaml . | nindent 4 }}{{- end }}
 spec:
   selector:
     {{- include "llm-operator.proxy.selectorLabels" . | nindent 4 }}
@@ -134,6 +146,9 @@ kind: HTTPRoute
 metadata:
   name: {{ $proxy.exposure.httpRoute.name }}
   namespace: {{ .Release.Namespace }}
+  labels: {app.kubernetes.io/managed-by: {{ .Release.Service }}}
+  annotations:
+    {{- include "llm-operator.proxy.ownershipAnnotations" . | nindent 4 }}
 spec:
   hostnames: {{ required "proxy.exposure.httpRoute.hostnames is required when enabled" $proxy.exposure.httpRoute.hostnames | toYaml | nindent 4 }}
   parentRefs: {{ required "proxy.exposure.httpRoute.parentRefs is required when enabled" $proxy.exposure.httpRoute.parentRefs | toYaml | nindent 4 }}
@@ -147,7 +162,13 @@ kind: ServiceMonitor
 metadata:
   name: {{ include "llm-operator.proxy.name" . }}
   namespace: {{ .Release.Namespace }}
-  labels: {{- toYaml $proxy.metrics.serviceMonitor.labels | nindent 4 }}
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    {{- with $proxy.metrics.serviceMonitor.labels }}
+    {{- toYaml $proxy.metrics.serviceMonitor.labels | nindent 4 }}
+    {{- end }}
+  annotations:
+    {{- include "llm-operator.proxy.ownershipAnnotations" . | nindent 4 }}
 spec:
   selector:
     matchLabels:
