@@ -13,6 +13,7 @@ proxy:
   backends:
     vllm: {url: http://vllm:8000, deployment: vllm, container: runtime}
     llamaCPP: {url: http://llama-cpp:8000, deployment: llama-cpp, container: runtime}
+  additionalBackendDeployments: [muse-glimmer-server]
   exposure:
     httpRoute:
       enabled: true

@@ -33,7 +33,12 @@ rules:
     verbs: ["get", "patch"]
   - apiGroups: ["apps"]
     resources: ["deployments"]
-    resourceNames: [{{ required "proxy.backends.vllm.deployment is required" $proxy.backends.vllm.deployment | quote }}, {{ required "proxy.backends.llamaCPP.deployment is required" $proxy.backends.llamaCPP.deployment | quote }}]
+    resourceNames:
+      - {{ required "proxy.backends.vllm.deployment is required" $proxy.backends.vllm.deployment | quote }}
+      - {{ required "proxy.backends.llamaCPP.deployment is required" $proxy.backends.llamaCPP.deployment | quote }}
+      {{- range $proxy.additionalBackendDeployments }}
+      - {{ . | quote }}
+      {{- end }}
     verbs: ["get", "watch"]
   - apiGroups: [""]
     resources: ["configmaps"]

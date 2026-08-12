@@ -93,6 +93,10 @@ if [[ "$(grep -c 'image: "ghcr.io/timblakely/llm-proxy@sha256:' "${proxy_rendere
   echo "chart check failed: enabled proxy image is not digest-pinned" >&2
   exit 1
 fi
+if ! grep -q -- 'muse-glimmer-server' "${proxy_rendered}"; then
+  echo "chart check failed: proxy Role is missing the configured dedicated backend" >&2
+  exit 1
+fi
 if ! grep -q 'key: llm.cogito.dev/backend' "${proxy_rendered}"; then
   echo "chart check failed: backend metrics monitor is missing the backend selector" >&2
   exit 1

@@ -110,6 +110,9 @@ proxy:
   backends:
     vllm: {url: "", deployment: "", container: runtime}
     llamaCPP: {url: "", deployment: "", container: runtime}
+  # Dedicated LLMBackend Deployments referenced by LLMModel.backendRef. Keep
+  # this explicit so the proxy can observe only approved workloads.
+  additionalBackendDeployments: []
   exposure:
     httpRoute:
       enabled: false
