@@ -57,6 +57,7 @@ var (
 type modelConfig struct {
 	Name        string
 	Backend     string
+	BackendRef  string
 	ModelSource string
 	DisplayName string
 	MaxModelLen int
@@ -972,7 +973,7 @@ func (p *proxy) reconcileIfMutable(logger *slog.Logger) {
 // runtime. Backend definitions are static proxy configuration, so ConfigMaps
 // can select a backend without gaining control over arbitrary Deployments.
 func (p *proxy) watchDeployments(logger *slog.Logger) {
-	for _, backend := range p.backends {
+	for _, backend := range p.registeredBackends() {
 		go p.watchDeployment(logger, backend)
 	}
 }
@@ -1058,6 +1059,13 @@ func parseLLMModel(object unstructured.Unstructured) (modelConfig, error) {
 	if err != nil || !found || (backend != "vllm" && backend != "llama-cpp") {
 		return modelConfig{}, fmt.Errorf("unsupported spec.serving.backend %q", backend)
 	}
+	backendRef, found, err := unstructured.NestedString(object.Object, "spec", "backendRef", "name")
+	if err != nil {
+		return modelConfig{}, fmt.Errorf("read spec.backendRef.name: %w", err)
+	}
+	if !found {
+		backendRef = ""
+	}
 	displayName, found, err := unstructured.NestedString(object.Object, "spec", "serving", "displayName")
 	if err != nil || !found || strings.TrimSpace(displayName) == "" {
 		return modelConfig{}, errors.New("spec.serving.displayName is required")
@@ -1081,7 +1089,7 @@ func parseLLMModel(object unstructured.Unstructured) (modelConfig, error) {
 	if backend == "llama-cpp" && (contains(args, "-m") || contains(args, "--model") || contains(args, "--alias")) {
 		return modelConfig{}, errors.New("spec.serving.args must not contain -m, --model, or --alias")
 	}
-	cfg := modelConfig{Name: name, ModelSource: source, Backend: backend, DisplayName: displayName, MaxModelLen: int(maxModelLen), Args: args, Created: object.GetCreationTimestamp().Time, Source: "crd/" + object.GetName()}
+	cfg := modelConfig{Name: name, ModelSource: source, Backend: backend, BackendRef: backendRef, DisplayName: displayName, MaxModelLen: int(maxModelLen), Args: args, Created: object.GetCreationTimestamp().Time, Source: "crd/" + object.GetName()}
 	if revision, found, _ := unstructured.NestedString(object.Object, "spec", "model", "revision"); found && revision != "" {
 		if !isCommitSHA(revision) {
 			return modelConfig{}, fmt.Errorf("spec.model.revision %q must be an immutable commit SHA", revision)
@@ -1194,7 +1202,7 @@ func (p *proxy) refresh(ctx context.Context) error {
 func (p *proxy) syncActiveDeployment(ctx context.Context) error {
 	var activeBackend *backendConfig
 	var model string
-	backends := p.backends
+	backends := p.registeredBackends()
 	if len(backends) == 0 {
 		backends = map[string]backendConfig{"vllm": {Name: "vllm", Deployment: p.deployment, Container: p.container, URL: p.backend}}
 	}
@@ -1228,12 +1236,12 @@ func (p *proxy) syncActiveDeployment(ctx context.Context) error {
 	if !ok {
 		return fmt.Errorf("active model %q is not configured", model)
 	}
-	configuredBackend := cfg.Backend
-	if configuredBackend == "" {
-		configuredBackend = "vllm"
+	configuredBackend, err := p.backendFor(cfg)
+	if err != nil {
+		return fmt.Errorf("resolve configured backend for %q: %w", model, err)
 	}
-	if configuredBackend != activeBackend.Name {
-		return fmt.Errorf("active %s backend is annotated with %q configured for %s", activeBackend.Name, model, configuredBackend)
+	if configuredBackend.Name != activeBackend.Name {
+		return fmt.Errorf("active backend %q is annotated with %q configured for %q", activeBackend.Name, model, configuredBackend.Name)
 	}
 	if p.active != model {
 		p.active = model
@@ -1275,6 +1283,13 @@ func effectiveArgs(cfg modelConfig) []string {
 }
 
 func (p *proxy) backendFor(cfg modelConfig) (backendConfig, error) {
+	if cfg.BackendRef != "" {
+		backendURL, err := url.Parse("http://" + cfg.BackendRef + ":8000")
+		if err != nil {
+			return backendConfig{}, fmt.Errorf("parse backendRef URL for %q: %w", cfg.BackendRef, err)
+		}
+		return backendConfig{Name: cfg.BackendRef, Deployment: cfg.BackendRef, Container: "runtime", URL: backendURL}, nil
+	}
 	name := cfg.Backend
 	if name == "" {
 		name = "vllm"
@@ -1288,6 +1303,38 @@ func (p *proxy) backendFor(cfg modelConfig) (backendConfig, error) {
 		return backendConfig{Name: "vllm", Deployment: p.deployment, Container: p.container, URL: p.backend}, nil
 	}
 	return backendConfig{}, fmt.Errorf("backend %q is not configured", name)
+}
+
+// registeredBackends derives the workloads the proxy observes from the same
+// LLMModel.backendRef contract the operator uses to activate them. This keeps
+// dedicated runtimes such as Muse Glimmer routable rather than silently
+// falling back to the generic vLLM endpoint.
+func (p *proxy) registeredBackends() map[string]backendConfig {
+	p.stateMu.RLock()
+	models := make([]modelConfig, 0, len(p.registry.models))
+	for _, cfg := range p.registry.models {
+		models = append(models, cfg)
+	}
+	p.stateMu.RUnlock()
+
+	backends := make(map[string]backendConfig, len(p.backends)+len(models))
+	hasBackendRefs := false
+	for _, cfg := range models {
+		if cfg.BackendRef == "" {
+			continue
+		}
+		hasBackendRefs = true
+		backend, err := p.backendFor(cfg)
+		if err == nil {
+			backends[backend.Name] = backend
+		}
+	}
+	if !hasBackendRefs {
+		for name, backend := range p.backends {
+			backends[name] = backend
+		}
+	}
+	return backends
 }
 
 func deploymentNeedsActivation(deployment *appsv1.Deployment, container string, cfg modelConfig) bool {
@@ -1743,8 +1790,8 @@ func (p *proxy) transition(parent context.Context, cfg modelConfig) error {
 	}
 	p.stateMu.RLock()
 	currentName := p.backendName
-	current, currentOK := p.backends[currentName]
 	p.stateMu.RUnlock()
+	current, currentOK := p.registeredBackends()[currentName]
 	if currentOK {
 		if _, err := p.client.AppsV1().Deployments(p.namespace).Patch(ctx, current.Deployment, types.StrategicMergePatchType, []byte(`{"spec":{"replicas":0}}`), metav1.PatchOptions{}); err != nil {
 			return fmt.Errorf("scale down %s backend: %w", current.Name, err)

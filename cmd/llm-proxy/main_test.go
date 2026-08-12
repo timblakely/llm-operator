@@ -156,6 +156,25 @@ func TestSyncActiveDeploymentSelectsActiveLagunaBackend(t *testing.T) {
 	}
 }
 
+func TestSyncActiveDeploymentRoutesDedicatedBackendRef(t *testing.T) {
+	zero, one := int32(0), int32(1)
+	client := fake.NewSimpleClientset(
+		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "llm-vllm", Namespace: "home-infra"}, Spec: appsv1.DeploymentSpec{Replicas: &zero}},
+		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "muse-glimmer-server", Namespace: "home-infra"}, Spec: appsv1.DeploymentSpec{Replicas: &one, Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{activeModelAnno: "muse"}}}}},
+	)
+	p := &proxy{
+		client: client, namespace: "home-infra", active: "gemma",
+		backends: map[string]backendConfig{"vllm": {Name: "vllm", Deployment: "llm-vllm"}},
+		registry: registry{models: map[string]modelConfig{"muse": {Name: "muse", Backend: "llama-cpp", BackendRef: "muse-glimmer-server"}}},
+	}
+	if err := p.syncActiveDeployment(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if p.active != "muse" || p.backendName != "muse-glimmer-server" || p.backend.String() != "http://muse-glimmer-server:8000" {
+		t.Fatalf("dedicated backend was not selected: model=%q backend=%q url=%v", p.active, p.backendName, p.backend)
+	}
+}
+
 func TestSyncActiveDeploymentRejectsMultipleBackends(t *testing.T) {
 	one := int32(1)
 	client := fake.NewSimpleClientset(
@@ -342,6 +361,18 @@ func TestParseLLMModelPreservesArtifactSize(t *testing.T) {
 	}
 	if cfg.Cache.Kind != "huggingface-files" || cfg.Cache.Size != 60*1024*1024*1024 || len(cfg.Cache.Files) != 1 {
 		t.Fatalf("artifact cache = %#v", cfg.Cache)
+	}
+}
+
+func TestParseLLMModelPreservesBackendRef(t *testing.T) {
+	model := llmModelObject("muse", "meta-models/Muse-Glimmer-30B-GGUF")
+	model.Object["spec"].(map[string]any)["backendRef"] = map[string]any{"name": "muse-glimmer-server"}
+	cfg, err := parseLLMModel(*model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.BackendRef != "muse-glimmer-server" {
+		t.Fatalf("backendRef = %q, want muse-glimmer-server", cfg.BackendRef)
 	}
 }
 
