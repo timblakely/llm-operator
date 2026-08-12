@@ -252,11 +252,22 @@ func (r *LLMActiveModelReconciler) executeTransition(ctx context.Context, active
 
 	startGen := activeModel.GetGeneration()
 
+	// A prior attempt at this exact generation already reached a terminal
+	// Failed state. Retry the checks below without re-announcing
+	// "Transitioning" first: flipping the phase back and forth on every
+	// retry hides the Failed state from anything reading status between
+	// reconciles (the proxy's synchronous wait included) behind whichever
+	// phase happens to be current at poll time. Phase only returns to
+	// Transitioning here once a new generation (an updated spec) arrives.
+	alreadyFailedThisGeneration := activeModel.Status.Phase == cogitodevv1alpha1.ActiveModelPhaseFailed &&
+		activeModel.Status.TransitionGeneration == startGen
+
 	// Persist a generation token before any external mutation. A Failed state,
 	// a new generation, or an incomplete legacy status starts a fresh attempt.
-	if activeModel.Status.Phase != cogitodevv1alpha1.ActiveModelPhaseTransitioning ||
-		activeModel.Status.TransitionGeneration != startGen ||
-		activeModel.Status.TransitionStarted == nil {
+	if !alreadyFailedThisGeneration &&
+		(activeModel.Status.Phase != cogitodevv1alpha1.ActiveModelPhaseTransitioning ||
+			activeModel.Status.TransitionGeneration != startGen ||
+			activeModel.Status.TransitionStarted == nil) {
 		activeModel.Status.Phase = cogitodevv1alpha1.ActiveModelPhaseTransitioning
 		activeModel.Status.TransitionFrom = activeModel.Status.ModelName
 		activeModel.Status.TransitionStarted = &metav1.Time{Time: time.Now()}
