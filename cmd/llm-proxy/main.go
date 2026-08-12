@@ -1649,7 +1649,7 @@ func (p *proxy) ensureActive(ctx context.Context, requested string) error {
 	}
 	if p.readOnlyTransitions {
 		p.stateMu.Unlock()
-		statusModel, phase, err := p.operatorTransitionState(ctx)
+		_, statusModel, phase, _, err := p.operatorTransitionState(ctx)
 		if err != nil {
 			return err
 		}
@@ -1744,14 +1744,23 @@ func (p *proxy) waitForOperatorTransition(parent context.Context, modelName stri
 	ticker := time.NewTicker(backendProbeWait)
 	defer ticker.Stop()
 	for {
-		statusModel, phase, err := p.operatorTransitionState(ctx)
+		specModel, statusModel, phase, message, err := p.operatorTransitionState(ctx)
 		if err != nil {
 			return err
 		}
 		if statusModel == modelName && phase == "Stable" {
 			return nil
 		}
-		if statusModel == modelName && phase == "Failed" {
+		// status.modelName only updates once a transition reaches Stable, so a
+		// failed attempt never has statusModel == modelName; compare against
+		// spec.modelName (the requested target) instead, which is set as soon
+		// as requestOperatorTransition patches the CR. Guard on specModel ==
+		// modelName too, so a Failed report for a target some other request
+		// has since superseded doesn't get attributed to this call.
+		if specModel == modelName && phase == "Failed" {
+			if message != "" {
+				return fmt.Errorf("operator transition to %q failed: %s", modelName, message)
+			}
 			return fmt.Errorf("operator transition to %q failed", modelName)
 		}
 		select {
@@ -1762,14 +1771,24 @@ func (p *proxy) waitForOperatorTransition(parent context.Context, modelName stri
 	}
 }
 
-func (p *proxy) operatorTransitionState(ctx context.Context) (string, string, error) {
+func (p *proxy) operatorTransitionState(ctx context.Context) (specModel, statusModel, phase, message string, err error) {
 	active, err := p.dynamic.Resource(activeModelGVR).Namespace(p.namespace).Get(ctx, activeModelName, metav1.GetOptions{})
 	if err != nil {
-		return "", "", fmt.Errorf("read operator ActiveModel: %w", err)
+		return "", "", "", "", fmt.Errorf("read operator ActiveModel: %w", err)
 	}
-	modelName, _, _ := unstructured.NestedString(active.Object, "status", "modelName")
-	phase, _, _ := unstructured.NestedString(active.Object, "status", "phase")
-	return modelName, phase, nil
+	specModel, _, _ = unstructured.NestedString(active.Object, "spec", "modelName")
+	statusModel, _, _ = unstructured.NestedString(active.Object, "status", "modelName")
+	phase, _, _ = unstructured.NestedString(active.Object, "status", "phase")
+	conditions, _, _ := unstructured.NestedSlice(active.Object, "status", "conditions")
+	for _, c := range conditions {
+		condition, ok := c.(map[string]any)
+		if !ok || condition["type"] != "ModelActive" {
+			continue
+		}
+		message, _, _ = unstructured.NestedString(condition, "message")
+		break
+	}
+	return specModel, statusModel, phase, message, nil
 }
 
 func (p *proxy) transition(parent context.Context, cfg modelConfig) error {
