@@ -22,6 +22,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"gopkg.in/yaml.v3"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -53,6 +55,43 @@ var (
 	llmOverlayGVR  = schema.GroupVersionResource{Group: "llm.cogito.dev", Version: "v1alpha1", Resource: "llmmodeloverlays"}
 	activeModelGVR = schema.GroupVersionResource{Group: "llm.cogito.dev", Version: "v1alpha1", Resource: "llmactivemodels"}
 )
+
+// latencyBuckets mirrors vLLM's own request-latency histogram boundaries so
+// proxy-observed latencies stay comparable to the native vllm: metrics.
+var latencyBuckets = []float64{
+	0.001, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.25, 0.5, 0.75,
+	1, 2.5, 5, 7.5, 10, 20, 40, 80, 160, 640, 2560,
+}
+
+// inferenceMetrics are computed by the proxy itself around every /v1/*
+// request rather than bridged from a backend's native metrics, because they
+// must hold true regardless of which backend runtime is active: llama.cpp's
+// own /metrics endpoint exposes token-count counters but, unlike vLLM,
+// publishes no request-duration or time-to-first-token histograms at all.
+var (
+	metricsRegistry = prometheus.NewRegistry()
+
+	llmRequestsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "llm_requests_total",
+		Help: "Total inference requests proxied to the active backend, labeled by outcome.",
+	}, []string{"model", "backend", "status"})
+
+	llmRequestDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "llm_request_duration_seconds",
+		Help:    "End-to-end inference request duration as observed by the proxy.",
+		Buckets: latencyBuckets,
+	}, []string{"model", "backend"})
+
+	llmTimeToFirstToken = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "llm_time_to_first_token_seconds",
+		Help:    "Time from request receipt to the first response byte from the backend, as observed by the proxy.",
+		Buckets: latencyBuckets,
+	}, []string{"model", "backend"})
+)
+
+func init() {
+	metricsRegistry.MustRegister(llmRequestsTotal, llmRequestDuration, llmTimeToFirstToken)
+}
 
 type modelConfig struct {
 	Name        string
@@ -269,7 +308,7 @@ func main() {
 	mux.HandleFunc("GET /v1/models", p.models)
 	mux.HandleFunc("GET /v1/models/{id}", p.model)
 	mux.HandleFunc("GET /vllm-proxy/config/{target}", p.hermesConfig)
-	mux.HandleFunc("/v1/", p.inference)
+	mux.HandleFunc("/v1/", p.instrumentInference)
 
 	server := &http.Server{
 		Addr:              env("LISTEN_ADDR", ":8080"),
@@ -1596,6 +1635,77 @@ func (p *proxy) inference(w http.ResponseWriter, r *http.Request) {
 	p.reverseProxy().ServeHTTP(w, r)
 }
 
+// instrumentInference wraps p.inference to record llm_requests_total,
+// llm_request_duration_seconds, and llm_time_to_first_token_seconds for
+// every /v1/* call, including early-return error paths (oversized body,
+// unknown model, in-flight transition) so the error rate these metrics feed
+// reflects everything a client actually observed, not just successful
+// round trips to a backend.
+func (p *proxy) instrumentInference(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	mw := &metricsResponseWriter{ResponseWriter: w}
+	p.inference(mw, r)
+	p.recordInferenceMetrics(mw, start)
+}
+
+func (p *proxy) recordInferenceMetrics(mw *metricsResponseWriter, start time.Time) {
+	p.stateMu.RLock()
+	model := p.active
+	backendType := p.registry.models[model].Backend
+	p.stateMu.RUnlock()
+	if model == "" || backendType == "" {
+		// No model was ever resolved as active for this request (e.g. it
+		// failed before ensureActive ran); there is nothing meaningful to
+		// label the observation with.
+		return
+	}
+
+	status := "success"
+	if mw.statusCode == 0 || mw.statusCode >= 400 {
+		status = "error"
+	}
+	labels := prometheus.Labels{"model": model, "backend": backendType}
+	llmRequestsTotal.With(prometheus.Labels{"model": model, "backend": backendType, "status": status}).Inc()
+	llmRequestDuration.With(labels).Observe(time.Since(start).Seconds())
+	if mw.firstByteSet {
+		llmTimeToFirstToken.With(labels).Observe(mw.firstByte.Sub(start).Seconds())
+	}
+}
+
+// metricsResponseWriter records the status code and first-byte timestamp of
+// a proxied response without buffering it, so streaming (SSE) responses keep
+// flushing to the client exactly as before. Unwrap lets http.ResponseController
+// find the underlying Flusher/Hijacker for httputil.ReverseProxy's streaming.
+type metricsResponseWriter struct {
+	http.ResponseWriter
+	statusCode   int
+	wroteHeader  bool
+	firstByte    time.Time
+	firstByteSet bool
+}
+
+func (m *metricsResponseWriter) Unwrap() http.ResponseWriter { return m.ResponseWriter }
+
+func (m *metricsResponseWriter) WriteHeader(code int) {
+	if !m.wroteHeader {
+		m.statusCode = code
+		m.wroteHeader = true
+	}
+	m.ResponseWriter.WriteHeader(code)
+}
+
+func (m *metricsResponseWriter) Write(b []byte) (int, error) {
+	if !m.wroteHeader {
+		m.statusCode = http.StatusOK
+		m.wroteHeader = true
+	}
+	if !m.firstByteSet && len(b) > 0 {
+		m.firstByte = time.Now()
+		m.firstByteSet = true
+	}
+	return m.ResponseWriter.Write(b)
+}
+
 func (p *proxy) overlay(name string) (overlayConfig, bool) {
 	p.stateMu.RLock()
 	overlay, ok := p.registry.overlays[name]
@@ -2314,9 +2424,10 @@ func (p *proxy) readyz(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-func (p *proxy) metrics(w http.ResponseWriter, _ *http.Request) {
+func (p *proxy) metrics(w http.ResponseWriter, r *http.Request) {
 	p.stateMu.RLock()
 	active, transitioning, activeSince := p.active, p.transitioning, p.activeSince
+	backendType := p.registry.models[active].Backend
 	p.stateMu.RUnlock()
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	if active != "" {
@@ -2333,6 +2444,112 @@ func (p *proxy) metrics(w http.ResponseWriter, _ *http.Request) {
 	if !activeSince.IsZero() {
 		fmt.Fprintf(w, "vllm_proxy_active_model_uptime_seconds %.6f\n", time.Since(activeSince).Seconds())
 	}
+	p.writeBridgedBackendMetrics(r.Context(), w, active, backendType)
+	// DisableCompression is required: promhttp negotiates gzip per-request and
+	// would otherwise wrap only its own segment of the body in a gzip stream,
+	// corrupting the response by mixing plaintext (the vllm_proxy_* and
+	// bridged llm_ lines written above) with binary gzip framing whenever the
+	// scraper sends Accept-Encoding: gzip, as Prometheus/vmagent always do.
+	promhttp.HandlerFor(metricsRegistry, promhttp.HandlerOpts{DisableCompression: true}).ServeHTTP(w, r)
+}
+
+// writeBridgedBackendMetrics republishes a handful of the active backend's
+// own token/cache metrics under the backend-agnostic llm_ namespace so
+// dashboards and alerts don't need per-backend-type panels. Only metrics the
+// backend runtime actually documents are bridged: llama.cpp's own /metrics
+// endpoint has no KV-cache-occupancy equivalent to vLLM's
+// vllm:kv_cache_usage_perc, so llm_kv_cache_usage_ratio is simply omitted
+// (not fabricated as zero) whenever llama.cpp is the active backend.
+func (p *proxy) writeBridgedBackendMetrics(ctx context.Context, w io.Writer, model, backendType string) {
+	if model == "" || backendType == "" {
+		return
+	}
+	var promptMetric, generationMetric, kvMetric string
+	switch backendType {
+	case "vllm":
+		promptMetric, generationMetric, kvMetric = "vllm:prompt_tokens_total", "vllm:generation_tokens_total", "vllm:kv_cache_usage_perc"
+	case "llama-cpp":
+		promptMetric, generationMetric = "llamacpp:prompt_tokens_total", "llamacpp:tokens_predicted_total"
+	default:
+		return
+	}
+	text, err := p.backendText(ctx, "/metrics")
+	if err != nil {
+		return
+	}
+	labels := fmt.Sprintf("model=%q,backend=%q", model, backendType)
+	if value, ok := sumMetric(text, promptMetric); ok {
+		fmt.Fprintf(w, "# HELP llm_prompt_tokens_total Prompt tokens processed, bridged from the active backend's native metrics.\n# TYPE llm_prompt_tokens_total counter\nllm_prompt_tokens_total{%s} %v\n", labels, value)
+	}
+	if value, ok := sumMetric(text, generationMetric); ok {
+		fmt.Fprintf(w, "# HELP llm_generation_tokens_total Generation tokens produced, bridged from the active backend's native metrics.\n# TYPE llm_generation_tokens_total counter\nllm_generation_tokens_total{%s} %v\n", labels, value)
+	}
+	if kvMetric == "" {
+		return
+	}
+	if value, ok := maxMetric(text, kvMetric); ok {
+		fmt.Fprintf(w, "# HELP llm_kv_cache_usage_ratio KV cache occupancy ratio (0-1), bridged from the active backend's native metrics.\n# TYPE llm_kv_cache_usage_ratio gauge\nllm_kv_cache_usage_ratio{%s} %v\n", labels, value)
+	}
+}
+
+// sumMetric sums every sample of the exact Prometheus metric name across all
+// of its label combinations (e.g. multiple engine="N" shards on a
+// tensor/data-parallel deployment), which is the correct aggregation for
+// monotonic counters like token totals.
+func sumMetric(text, name string) (float64, bool) {
+	found := false
+	total := 0.0
+	for _, value := range metricSamples(text, name) {
+		total += value
+		found = true
+	}
+	return total, found
+}
+
+// maxMetric returns the largest sample of the exact Prometheus metric name,
+// appropriate for gauges such as KV cache occupancy where summing across
+// engines/shards would not be a meaningful ratio.
+func maxMetric(text, name string) (float64, bool) {
+	found := false
+	max := 0.0
+	for _, value := range metricSamples(text, name) {
+		if !found || value > max {
+			max = value
+		}
+		found = true
+	}
+	return max, found
+}
+
+// metricSamples scans Prometheus text-exposition-format output for lines
+// whose metric name is exactly name (not merely a prefix of a longer name)
+// and returns each sample's value.
+func metricSamples(text, name string) []float64 {
+	var values []float64
+	scanner := bufio.NewScanner(strings.NewReader(text))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		rest, ok := strings.CutPrefix(line, name)
+		if !ok {
+			continue
+		}
+		if rest != "" && rest[0] != '{' && rest[0] != ' ' {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		value, err := strconv.ParseFloat(fields[len(fields)-1], 64)
+		if err != nil {
+			continue
+		}
+		values = append(values, value)
+	}
+	return values
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

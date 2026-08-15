@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -16,6 +17,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -835,3 +839,224 @@ func TestInferenceForwardsCanonicalModelName(t *testing.T) {
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) { return fn(request) }
+
+func TestMetricsResponseWriterCapturesStatusAndFirstByteOnce(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	mw := &metricsResponseWriter{ResponseWriter: recorder}
+	mw.WriteHeader(http.StatusTeapot)
+	if _, err := mw.Write([]byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	if mw.statusCode != http.StatusTeapot {
+		t.Fatalf("statusCode = %d, want %d", mw.statusCode, http.StatusTeapot)
+	}
+	if !mw.firstByteSet {
+		t.Fatal("firstByteSet = false, want true after first Write")
+	}
+	first := mw.firstByte
+	if _, err := mw.Write([]byte("world")); err != nil {
+		t.Fatal(err)
+	}
+	if mw.firstByte != first {
+		t.Fatal("firstByte must be recorded only once, on the first Write, not on later chunks of a streamed response")
+	}
+}
+
+func TestMetricsResponseWriterDefaultsStatusOnImplicitWrite(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	mw := &metricsResponseWriter{ResponseWriter: recorder}
+	if _, err := mw.Write([]byte("ok")); err != nil {
+		t.Fatal(err)
+	}
+	if mw.statusCode != http.StatusOK {
+		t.Fatalf("statusCode = %d, want %d (net/http defaults to 200 when WriteHeader is never called)", mw.statusCode, http.StatusOK)
+	}
+}
+
+// observationCount reports how many samples a histogram vec's series for the
+// given labels has recorded, letting tests assert an Observe happened
+// without depending on exact latency values.
+func observationCount(t *testing.T, vec *prometheus.HistogramVec, labels prometheus.Labels) uint64 {
+	t.Helper()
+	observer, err := vec.GetMetricWith(labels)
+	if err != nil {
+		t.Fatal(err)
+	}
+	histogram, ok := observer.(prometheus.Histogram)
+	if !ok {
+		t.Fatalf("observer for %v is not a prometheus.Histogram", labels)
+	}
+	var metric dto.Metric
+	if err := histogram.Write(&metric); err != nil {
+		t.Fatal(err)
+	}
+	return metric.GetHistogram().GetSampleCount()
+}
+
+func TestInstrumentInferenceRecordsSuccessMetrics(t *testing.T) {
+	const modelName = "test-model-metrics-success"
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer backend.Close()
+	backendURL, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &proxy{
+		backend: backendURL,
+		registry: registry{models: map[string]modelConfig{
+			modelName: {Name: modelName, Backend: "vllm"},
+		}},
+		active:  modelName,
+		maxBody: 1 << 20,
+	}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"`+modelName+`","messages":[]}`))
+	p.instrumentInference(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", recorder.Code)
+	}
+	successLabels := prometheus.Labels{"model": modelName, "backend": "vllm", "status": "success"}
+	if got := testutil.ToFloat64(llmRequestsTotal.With(successLabels)); got != 1 {
+		t.Fatalf("llm_requests_total{status=success} = %v, want 1", got)
+	}
+	durationLabels := prometheus.Labels{"model": modelName, "backend": "vllm"}
+	if count := observationCount(t, llmRequestDuration, durationLabels); count != 1 {
+		t.Fatalf("llm_request_duration_seconds sample count = %d, want 1", count)
+	}
+	if count := observationCount(t, llmTimeToFirstToken, durationLabels); count != 1 {
+		t.Fatalf("llm_time_to_first_token_seconds sample count = %d, want 1", count)
+	}
+}
+
+func TestInstrumentInferenceRecordsErrorStatusOnBackendFailure(t *testing.T) {
+	const modelName = "test-model-metrics-error"
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer backend.Close()
+	backendURL, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &proxy{
+		backend: backendURL,
+		registry: registry{models: map[string]modelConfig{
+			modelName: {Name: modelName, Backend: "vllm"},
+		}},
+		active:  modelName,
+		maxBody: 1 << 20,
+	}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"`+modelName+`","messages":[]}`))
+	p.instrumentInference(recorder, request)
+
+	errorLabels := prometheus.Labels{"model": modelName, "backend": "vllm", "status": "error"}
+	if got := testutil.ToFloat64(llmRequestsTotal.With(errorLabels)); got != 1 {
+		t.Fatalf("llm_requests_total{status=error} = %v, want 1", got)
+	}
+}
+
+func TestInstrumentInferenceSkipsMetricsWithoutResolvedModel(t *testing.T) {
+	// No active model and no backend configured: p.inference fails fast via
+	// respondTransitionError before any model is ever resolved. The point of
+	// this test is that recordInferenceMetrics does not panic or fabricate a
+	// bogus, empty-labeled observation in that case.
+	p := &proxy{maxBody: 1 << 20}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"messages":[]}`))
+	p.instrumentInference(recorder, request)
+	if recorder.Code == http.StatusOK {
+		t.Fatalf("expected a non-200 response with no active model, got %d", recorder.Code)
+	}
+}
+
+func TestWriteBridgedBackendMetricsSumsVLLMCountersAndTakesMaxGauge(t *testing.T) {
+	const modelName = "test-model-bridge-vllm"
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintln(w, `vllm:prompt_tokens_total{engine="0",model_name="x"} 100`)
+		fmt.Fprintln(w, `vllm:prompt_tokens_total{engine="1",model_name="x"} 50`)
+		fmt.Fprintln(w, `vllm:generation_tokens_total{engine="0",model_name="x"} 30`)
+		fmt.Fprintln(w, `vllm:kv_cache_usage_perc{engine="0",model_name="x"} 0.4`)
+		fmt.Fprintln(w, `vllm:kv_cache_usage_perc{engine="1",model_name="x"} 0.9`)
+	}))
+	defer backend.Close()
+	backendURL, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &proxy{backend: backendURL, httpClient: http.DefaultClient}
+	var buf bytes.Buffer
+	p.writeBridgedBackendMetrics(context.Background(), &buf, modelName, "vllm")
+	out := buf.String()
+	if !strings.Contains(out, `llm_prompt_tokens_total{model="test-model-bridge-vllm",backend="vllm"} 150`) {
+		t.Fatalf("prompt tokens across engines were not summed correctly:\n%s", out)
+	}
+	if !strings.Contains(out, `llm_generation_tokens_total{model="test-model-bridge-vllm",backend="vllm"} 30`) {
+		t.Fatalf("generation tokens were not bridged correctly:\n%s", out)
+	}
+	if !strings.Contains(out, `llm_kv_cache_usage_ratio{model="test-model-bridge-vllm",backend="vllm"} 0.9`) {
+		t.Fatalf("kv cache ratio should take the max across engines, not the sum:\n%s", out)
+	}
+}
+
+func TestWriteBridgedBackendMetricsOmitsKVCacheForLlamaCpp(t *testing.T) {
+	const modelName = "test-model-bridge-llama"
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintln(w, `llamacpp:prompt_tokens_total 200`)
+		fmt.Fprintln(w, `llamacpp:tokens_predicted_total 80`)
+	}))
+	defer backend.Close()
+	backendURL, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &proxy{backend: backendURL, httpClient: http.DefaultClient}
+	var buf bytes.Buffer
+	p.writeBridgedBackendMetrics(context.Background(), &buf, modelName, "llama-cpp")
+	out := buf.String()
+	if !strings.Contains(out, `llm_prompt_tokens_total{model="test-model-bridge-llama",backend="llama-cpp"} 200`) {
+		t.Fatalf("prompt tokens were not bridged correctly:\n%s", out)
+	}
+	if !strings.Contains(out, `llm_generation_tokens_total{model="test-model-bridge-llama",backend="llama-cpp"} 80`) {
+		t.Fatalf("generation tokens were not bridged correctly:\n%s", out)
+	}
+	if strings.Contains(out, "llm_kv_cache_usage_ratio") {
+		t.Fatalf("llama.cpp's own /metrics has no KV-cache-occupancy equivalent; llm_kv_cache_usage_ratio must not be fabricated:\n%s", out)
+	}
+}
+
+func TestMetricsEndpointIgnoresAcceptEncodingGzip(t *testing.T) {
+	// Real scrapers (Prometheus, vmagent) send Accept-Encoding: gzip.
+	// promhttp negotiates compression per request by default and would wrap
+	// only its own segment of the body in a gzip stream, corrupting the
+	// response by mixing it with the plaintext vllm_proxy_*/llm_ lines
+	// written directly to w above it. Compression must stay disabled.
+	p := &proxy{}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	request.Header.Set("Accept-Encoding", "gzip")
+	p.metrics(recorder, request)
+
+	body := recorder.Body.Bytes()
+	if len(body) >= 2 && body[0] == 0x1f && body[1] == 0x8b {
+		t.Fatal("metrics response is gzip-framed even though the endpoint must always serve plaintext")
+	}
+	if !strings.Contains(string(body), "vllm_proxy_transitioning 0") {
+		t.Fatalf("metrics response is not valid plaintext:\n%q", body)
+	}
+	if ce := recorder.Header().Get("Content-Encoding"); ce != "" {
+		t.Fatalf("Content-Encoding = %q, want unset", ce)
+	}
+}
+
+func TestMetricSamplesDoesNotMatchALongerMetricNameSharingAPrefix(t *testing.T) {
+	text := "vllm:prompt_tokens_total_created 123\nvllm:prompt_tokens_total 45\n"
+	values := metricSamples(text, "vllm:prompt_tokens_total")
+	if len(values) != 1 || values[0] != 45 {
+		t.Fatalf("metricSamples = %v, want [45] (must not match the _created variant of a longer metric name)", values)
+	}
+}
