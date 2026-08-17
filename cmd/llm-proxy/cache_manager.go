@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"slices"
 	"sort"
 	"strings"
@@ -69,6 +70,14 @@ type cacheManager struct {
 }
 
 func runCacheManager() {
+	// The previous four crashes (Exit Code 2, no panic trace in either the
+	// crashing or the following container's logs) are consistent with a
+	// panic in a detached background goroutine, which net/http's per-request
+	// recovery cannot catch. "system" tracebacks dump every goroutine's stack
+	// on a fatal error (not just a plain panic's), so a Go-runtime-level
+	// fault - not just an application panic - leaves a diagnosable trace next
+	// time instead of a silent restart.
+	debug.SetTraceback("system")
 	m := &cacheManager{
 		hotRoot: env("CACHE_HOT_ROOT", "/cache/hot"),
 		cold:    env("CACHE_COLD", "/cold"), maxPercent: 95,
@@ -315,6 +324,25 @@ print(json.dumps({"size":total,"files":files}))`
 	return nil
 }
 
+// runRecovered runs fn in a new goroutine. Unlike an HTTP handler - where
+// net/http's own per-request recover() turns a panic into a closed
+// connection rather than a crash - a detached background goroutine like the
+// cold-archive copy below has nothing catching a panic above it: left
+// unrecovered, it takes down the whole process, silently failing every
+// other in-flight and future request along with it. Convert that into a
+// logged error with a full stack trace instead.
+func (m *cacheManager) runRecovered(op, key string, fn func()) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				m.failures.Add(1)
+				m.logger.Error("panic in background cache operation", "op", op, "key", key, "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+			}
+		}()
+		fn()
+	}()
+}
+
 func (m *cacheManager) ensureArtifact(r cacheRequest) error {
 	hot := m.hotRoot
 	key := cacheKey(r.Cache)
@@ -335,11 +363,11 @@ func (m *cacheManager) ensureArtifact(r cacheRequest) error {
 		m.logger.Info("model artifact already complete in hot cache", "key", key)
 		if !validArtifactMetadata(coldArtifact, r.Cache) {
 			m.logger.Info("refreshing cold artifact manifest from hot cache", "key", key)
-			go func() {
+			m.runRecovered("archive hot", key, func() {
 				if err := m.archiveHot(r, hot, coldArtifact); err != nil {
 					m.logger.Error("background archive hot failed", "key", key, "error", err)
 				}
-			}()
+			})
 		}
 		_ = os.Chtimes(hotArtifact, time.Now(), time.Now())
 		return m.sweep(hot, key)
@@ -387,14 +415,14 @@ func (m *cacheManager) ensureArtifact(r cacheRequest) error {
 	m.logger.Info("successfully ensured hot artifact", "key", key)
 
 	// Asynchronously write to cold storage so hot serving is ready immediately
-	go func() {
+	m.runRecovered("cold archive", key, func() {
 		m.logger.Info("archiving hot artifact to cold storage in background", "key", key)
 		if err := m.archiveHot(r, hot, coldArtifact); err != nil {
 			m.logger.Error("background cold archiving failed", "key", key, "error", err)
 		} else {
 			m.logger.Info("background cold archiving completed", "key", key)
 		}
-	}()
+	})
 
 	return nil
 }
@@ -558,9 +586,7 @@ func (m *cacheManager) sweep(hot, preserve string) error {
 		return err
 	}
 	sort.Slice(entries, func(i, j int) bool {
-		a, _ := entries[i].Info()
-		b, _ := entries[j].Info()
-		return a.ModTime().Before(b.ModTime())
+		return entryModTime(entries[i]).Before(entryModTime(entries[j]))
 	})
 	for _, entry := range entries {
 		if entry.Name() == preserve {
@@ -583,6 +609,21 @@ func (m *cacheManager) sweep(hot, preserve string) error {
 func cacheKey(c cacheSpec) string {
 	return strings.NewReplacer("/", "--", "@", "-").Replace(c.Kind + "-" + c.RepoID + "-" + c.Revision)
 }
+
+// entryModTime stats a directory entry for eviction ordering. A failed stat
+// - most plausibly a TOCTOU race where the entry is removed between the
+// ReadDir call and this one - previously left a nil os.FileInfo that the
+// caller's sort comparator dereferenced directly, panicking. Sort a
+// vanished/inaccessible entry as the oldest so it sorts first rather than
+// crashing the comparison.
+func entryModTime(entry os.DirEntry) time.Time {
+	info, err := entry.Info()
+	if err != nil {
+		return time.Time{}
+	}
+	return info.ModTime()
+}
+
 func complete(dir string) bool { _, err := os.Stat(filepath.Join(dir, ".complete")); return err == nil }
 func writeComplete(dir string) error {
 	return os.WriteFile(filepath.Join(dir, ".complete"), []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o644)
@@ -877,9 +918,7 @@ func (m *cacheManager) makeSpace(hot string, incoming int64) error {
 	// The cache-manager only runs while the proxy has scaled inference down;
 	// at this point every hot artifact is safe to evict. Sort by marker mtime.
 	sort.Slice(entries, func(i, j int) bool {
-		a, _ := entries[i].Info()
-		b, _ := entries[j].Info()
-		return a.ModTime().Before(b.ModTime())
+		return entryModTime(entries[i]).Before(entryModTime(entries[j]))
 	})
 	for _, entry := range entries {
 		if err := m.evict(hot, filepath.Join(hot, ".llm-cache", entry.Name())); err != nil {

@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestRemoveStagingRemovesColdAndHotIncompleteDirectories(t *testing.T) {
@@ -283,5 +286,78 @@ func TestEvictionPreservesOtherFileArtifact(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(materializedPath(hot, second), second.Files[0])); err != nil {
 		t.Fatalf("second artifact was removed: %v", err)
+	}
+}
+
+func TestRunRecoveredConvertsPanicToLoggedErrorInsteadOfCrashing(t *testing.T) {
+	var buf bytes.Buffer
+	m := &cacheManager{logger: slog.New(slog.NewTextHandler(&buf, nil))}
+
+	m.runRecovered("archive hot", "some-key", func() {
+		panic("simulated background failure")
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !strings.Contains(buf.String(), "panic in background cache operation") {
+		time.Sleep(10 * time.Millisecond)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "panic in background cache operation") {
+		t.Fatalf("log output = %q, want a logged panic-recovery message (the panic must not crash the process)", got)
+	}
+	if !strings.Contains(got, "simulated background failure") {
+		t.Fatalf("log output = %q, want the panic value included", got)
+	}
+	if got := m.failures.Load(); got != 1 {
+		t.Fatalf("failures = %d, want 1", got)
+	}
+}
+
+func TestRunRecoveredRunsFnNormallyWhenNoPanic(t *testing.T) {
+	var buf bytes.Buffer
+	m := &cacheManager{logger: slog.New(slog.NewTextHandler(&buf, nil))}
+	done := make(chan struct{})
+	m.runRecovered("op", "key", func() { close(done) })
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fn was never run")
+	}
+	if strings.Contains(buf.String(), "panic") {
+		t.Fatalf("unexpected panic logged for a non-panicking fn: %s", buf.String())
+	}
+}
+
+func TestEntryModTimeReturnsZeroForAVanishedEntry(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gone")
+	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("ReadDir = %v, %v", entries, err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	// entries[0].Info() now re-stats a path that no longer exists and
+	// returns an error; entryModTime must not dereference a nil FileInfo.
+	if got := entryModTime(entries[0]); !got.IsZero() {
+		t.Fatalf("entryModTime for a vanished entry = %v, want the zero time", got)
+	}
+}
+
+func TestEntryModTimeReturnsRealModTimeForAPresentEntry(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "present"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("ReadDir = %v, %v", entries, err)
+	}
+	if got := entryModTime(entries[0]); got.IsZero() {
+		t.Fatal("entryModTime for a present file returned the zero time")
 	}
 }
