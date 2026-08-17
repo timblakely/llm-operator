@@ -25,7 +25,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"gopkg.in/yaml.v3"
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -172,32 +171,23 @@ type proxy struct {
 	transitionLimit time.Duration
 	maxBody         int64
 	cacheManager    *url.URL
-	// readOnlyTransitions keeps the catalog, overlay, and backend-observation
-	// paths live while preventing this proxy from changing Deployments. It is
-	// used for the operator handoff canary; false is deliberately the zero value
-	// so existing callers and tests retain the current transition behavior.
-	readOnlyTransitions bool
 
-	stateMu         sync.RWMutex
-	registry        registry
-	active          string
-	transitioning   bool
-	transitionModel string
-	// transitionCancel interrupts an obsolete rollout. The next reconciliation
-	// applies the current desired model's arguments.
-	transitionCancel context.CancelFunc
-	reconcilePending bool
-	ready            bool
-	startedAt        time.Time
-	activeSince      time.Time
+	stateMu     sync.RWMutex
+	registry    registry
+	active      string
+	ready       bool
+	startedAt   time.Time
+	activeSince time.Time
 
 	switchesTotal atomic.Uint64
 	configErrors  atomic.Uint64
-	cacheHotHits  atomic.Uint64
-	cacheColdHits atomic.Uint64
-	cacheExternal atomic.Uint64
-	lastSwitch    atomic.Int64 // nanoseconds
-	lastStart     atomic.Int64 // nanoseconds
+	// lastSwitch and lastStart are set together in coalescedOperatorTransition:
+	// the proxy no longer observes a distinct "patched, now waiting for
+	// rollout" phase separate from "waiting for the operator", so both
+	// vllm_proxy_last_switch_duration_seconds and
+	// vllm_proxy_last_startup_duration_seconds now measure the same thing.
+	lastSwitch atomic.Int64 // nanoseconds
+	lastStart  atomic.Int64 // nanoseconds
 
 	capabilityMu        sync.Mutex
 	capabilityDiscovery map[string]bool
@@ -288,14 +278,13 @@ func main() {
 			"vllm":      {Name: "vllm", Deployment: vllmDeployment, Container: vllmContainer, URL: backend},
 			"llama-cpp": {Name: "llama-cpp", Deployment: env("LLAMA_DEPLOYMENT", "llm-laguna"), Container: env("LLAMA_CONTAINER", "laguna"), URL: llamaBackend},
 		},
-		active:              env("DEFAULT_MODEL", ""),
-		publicBaseURL:       strings.TrimSuffix(env("PUBLIC_BASE_URL", "http://llm-proxy:8080/v1"), "/"),
-		httpClient:          &http.Client{Timeout: 15 * time.Second},
-		transitionLimit:     durationEnv("TRANSITION_TIMEOUT", defaultTimeout),
-		cacheManager:        cacheManager,
-		maxBody:             int64Env("MAX_REQUEST_BODY_BYTES", defaultMaxBody),
-		readOnlyTransitions: !boolEnv("ENABLE_DEPLOYMENT_MUTATIONS", true),
-		startedAt:           time.Now(),
+		active:          env("DEFAULT_MODEL", ""),
+		publicBaseURL:   strings.TrimSuffix(env("PUBLIC_BASE_URL", "http://llm-proxy:8080/v1"), "/"),
+		httpClient:      &http.Client{Timeout: 15 * time.Second},
+		transitionLimit: durationEnv("TRANSITION_TIMEOUT", defaultTimeout),
+		cacheManager:    cacheManager,
+		maxBody:         int64Env("MAX_REQUEST_BODY_BYTES", defaultMaxBody),
+		startedAt:       time.Now(),
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -303,11 +292,7 @@ func main() {
 		logger.Warn("initial model registry load failed; will retry", "error", err)
 	}
 	cancel()
-	if !p.readOnlyTransitions {
-		go p.reconcileActiveDeployment(logger)
-	} else {
-		logger.Info("deployment mutations disabled; proxy is serving catalog and overlays read-only")
-	}
+	logger.Info("proxy is serving catalog, overlays, and inference; model switches are requested from the operator")
 	go p.sweepCache(logger)
 	go p.watchLLMResources(logger)
 	go p.watchDeployments(logger)
@@ -1008,14 +993,7 @@ func (p *proxy) watchLLMResource(logger *slog.Logger, gvr schema.GroupVersionRes
 				logger.Warn("refresh LLM resources", "kind", kind, "error", err)
 			}
 			cancel()
-			p.reconcileIfMutable(logger)
 		}
-	}
-}
-
-func (p *proxy) reconcileIfMutable(logger *slog.Logger) {
-	if !p.readOnlyTransitions {
-		go p.reconcileActiveDeployment(logger)
 	}
 }
 
@@ -1279,9 +1257,6 @@ func (p *proxy) syncActiveDeployment(ctx context.Context) error {
 	}
 	p.stateMu.Lock()
 	defer p.stateMu.Unlock()
-	if p.transitioning {
-		return nil
-	}
 	cfg, ok := p.registry.models[model]
 	if !ok {
 		return fmt.Errorf("active model %q is not configured", model)
@@ -1385,100 +1360,6 @@ func (p *proxy) registeredBackends() map[string]backendConfig {
 		}
 	}
 	return backends
-}
-
-func deploymentNeedsActivation(deployment *appsv1.Deployment, container string, cfg modelConfig) bool {
-	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != 1 {
-		return true
-	}
-	want := effectiveArgs(cfg)
-	for _, candidate := range deployment.Spec.Template.Spec.Containers {
-		if candidate.Name != container {
-			continue
-		}
-		if len(candidate.Args) != len(want) {
-			return true
-		}
-		for i := range want {
-			if candidate.Args[i] != want[i] {
-				return true
-			}
-		}
-		return false
-	}
-	return true
-}
-
-// reconcileActiveDeployment materializes the active model ConfigMap into the
-// Helm-managed Deployment. Helm owns the pod template; Switchboard owns only
-// the selected model arguments and replica count.
-func (p *proxy) reconcileActiveDeployment(logger *slog.Logger) {
-	if p.readOnlyTransitions {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), p.transitionLimit)
-	defer cancel()
-
-	p.stateMu.RLock()
-	cfg, ok := p.registry.models[p.active]
-	p.stateMu.RUnlock()
-	if !ok {
-		return
-	}
-
-	backend, err := p.backendFor(cfg)
-	if err != nil {
-		p.configErrors.Add(1)
-		logger.Warn("resolve active model backend", "model", cfg.Name, "error", err)
-		return
-	}
-	deployment, err := p.client.AppsV1().Deployments(p.namespace).Get(ctx, backend.Deployment, metav1.GetOptions{})
-	if err != nil {
-		p.configErrors.Add(1)
-		logger.Warn("get backend Deployment for active-model reconciliation", "backend", backend.Name, "error", err)
-		return
-	}
-	if !deploymentNeedsActivation(deployment, backend.Container, cfg) {
-		return
-	}
-
-	p.stateMu.Lock()
-	if p.active != cfg.Name {
-		p.stateMu.Unlock()
-		return
-	}
-	if p.transitioning {
-		p.reconcilePending = true
-		transitionCancel := p.transitionCancel
-		p.stateMu.Unlock()
-		if transitionCancel != nil {
-			transitionCancel()
-		}
-		return
-	}
-	p.transitioning = true
-	p.transitionModel = cfg.Name
-	p.transitionCancel = cancel
-	p.stateMu.Unlock()
-	defer func() {
-		p.stateMu.Lock()
-		p.transitioning = false
-		p.transitionModel = ""
-		p.transitionCancel = nil
-		pending := p.reconcilePending
-		p.reconcilePending = false
-		p.stateMu.Unlock()
-		if pending {
-			go p.reconcileActiveDeployment(logger)
-		}
-	}()
-
-	if err := p.transition(ctx, cfg); err != nil {
-		if !errors.Is(err, context.Canceled) {
-			p.configErrors.Add(1)
-			logger.Warn("reconcile active model", "model", cfg.Name, "backend", cfg.Backend, "error", err)
-		}
-	}
 }
 
 func (p *proxy) models(w http.ResponseWriter, _ *http.Request) {
@@ -1756,84 +1637,30 @@ func mergeDefaults(request, defaults map[string]any) {
 }
 
 var (
-	errTransitioning               = errors.New("model transition in progress")
 	errBackendUnavailable          = errors.New("no active vLLM backend")
-	errDeploymentMutationsDisabled = errors.New("model transitions are disabled")
+	errDeploymentMutationsDisabled = errors.New("the operator is not configured")
 )
 
+// ensureActive requests and waits for the operator to make requested the
+// active model. The operator remains the sole mutator of backend
+// Deployments; this only ever patches LLMActiveModel and reads status back.
 func (p *proxy) ensureActive(ctx context.Context, requested string) error {
-	p.stateMu.Lock()
+	p.stateMu.RLock()
 	cfg, exists := p.registry.models[requested]
+	p.stateMu.RUnlock()
 	if !exists {
-		p.stateMu.Unlock()
 		return fmt.Errorf("unknown model %q", requested)
 	}
-	if p.readOnlyTransitions {
-		p.stateMu.Unlock()
-		_, statusModel, phase, _, err := p.operatorTransitionState(ctx)
-		if err != nil {
-			return err
-		}
-		if statusModel != cfg.Name || phase != "Stable" {
-			if err := p.coalescedOperatorTransition(ctx, cfg.Name); err != nil {
-				return err
-			}
-		}
-		return p.syncActiveDeployment(ctx)
-	}
-	if p.transitioning {
-		if p.transitionModel == requested {
-			p.stateMu.Unlock()
-			return errTransitioning
-		}
-		// A request for another model supersedes the model currently starting.
-		// Keep active as the desired model so the queued reconciliation starts it
-		// as soon as the canceled rollout releases the transition lock.
-		if p.active != requested {
-			p.active = requested
-		}
-		p.reconcilePending = true
-		transitionCancel := p.transitionCancel
-		p.stateMu.Unlock()
-		if transitionCancel != nil {
-			transitionCancel()
-		}
-		return errTransitioning
-	}
-	if p.active == requested {
-		p.stateMu.Unlock()
-		return nil
-	}
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	p.transitioning = true
-	p.transitionModel = cfg.Name
-	p.transitionCancel = cancel
-	p.stateMu.Unlock()
-
-	defer func() {
-		p.stateMu.Lock()
-		p.transitioning = false
-		p.transitionModel = ""
-		p.transitionCancel = nil
-		pending := p.reconcilePending
-		p.reconcilePending = false
-		p.stateMu.Unlock()
-		if pending {
-			p.reconcileIfMutable(slog.Default())
-		}
-	}()
-	started := time.Now()
-	if err := p.transition(ctx, cfg); err != nil {
+	_, statusModel, phase, _, err := p.operatorTransitionState(ctx)
+	if err != nil {
 		return err
 	}
-	p.switchesTotal.Add(1)
-	p.lastSwitch.Store(time.Since(started).Nanoseconds())
-	p.stateMu.Lock()
-	p.active = cfg.Name
-	p.activeSince = time.Now()
-	p.stateMu.Unlock()
-	return nil
+	if statusModel != cfg.Name || phase != "Stable" {
+		if err := p.coalescedOperatorTransition(ctx, cfg.Name); err != nil {
+			return err
+		}
+	}
+	return p.syncActiveDeployment(ctx)
 }
 
 // coalescedOperatorTransition shares one Patch+poll of LLMActiveModel across
@@ -1861,11 +1688,21 @@ func (p *proxy) coalescedOperatorTransition(ctx context.Context, modelName strin
 	p.switchWaiters[modelName] = wait
 	p.switchMu.Unlock()
 
+	started := time.Now()
 	leaderCtx, cancel := context.WithTimeout(context.Background(), p.transitionLimit)
 	defer cancel()
 	err := p.requestOperatorTransition(leaderCtx, modelName)
 	if err == nil {
 		err = p.waitForOperatorTransition(leaderCtx, modelName)
+	}
+	if err == nil {
+		p.switchesTotal.Add(1)
+		// The proxy no longer observes a distinct "patched, now waiting for
+		// rollout" phase separate from "waiting for the operator", so both
+		// duration metrics record the same measurement.
+		elapsed := time.Since(started).Nanoseconds()
+		p.lastSwitch.Store(elapsed)
+		p.lastStart.Store(elapsed)
 	}
 
 	p.switchMu.Lock()
@@ -1969,120 +1806,6 @@ func (p *proxy) operatorTransitionState(ctx context.Context) (specModel, statusM
 	return specModel, statusModel, phase, message, nil
 }
 
-func (p *proxy) transition(parent context.Context, cfg modelConfig) error {
-	if p.readOnlyTransitions {
-		return errDeploymentMutationsDisabled
-	}
-	ctx, cancel := context.WithTimeout(parent, p.transitionLimit)
-	defer cancel()
-	target, err := p.backendFor(cfg)
-	if err != nil {
-		return err
-	}
-	// Verify the selected runtime exists before disrupting the active one.
-	// This keeps a configuration or Helm reconciliation failure from taking
-	// the serving backend offline.
-	if _, err := p.client.AppsV1().Deployments(p.namespace).Get(ctx, target.Deployment, metav1.GetOptions{}); err != nil {
-		return fmt.Errorf("get %s backend Deployment: %w", target.Name, err)
-	}
-	p.stateMu.RLock()
-	currentName := p.backendName
-	p.stateMu.RUnlock()
-	current, currentOK := p.registeredBackends()[currentName]
-	if currentOK {
-		if _, err := p.client.AppsV1().Deployments(p.namespace).Patch(ctx, current.Deployment, types.StrategicMergePatchType, []byte(`{"spec":{"replicas":0}}`), metav1.PatchOptions{}); err != nil {
-			return fmt.Errorf("scale down %s backend: %w", current.Name, err)
-		}
-		for {
-			old, err := p.client.AppsV1().Deployments(p.namespace).Get(ctx, current.Deployment, metav1.GetOptions{})
-			if err == nil && old.Status.Replicas == 0 && old.Status.AvailableReplicas == 0 {
-				break
-			}
-			if err := ctx.Err(); err != nil {
-				return fmt.Errorf("wait for %s backend to stop: %w", current.Name, err)
-			}
-			time.Sleep(backendProbeWait)
-		}
-	}
-	if err := p.ensureCached(ctx, cfg); err != nil {
-		return err
-	}
-	patchedAt := time.Now()
-	patch, err := json.Marshal(map[string]any{"spec": map[string]any{"replicas": 1, "template": map[string]any{
-		"metadata": map[string]any{"annotations": map[string]string{activeModelAnno: cfg.Name, switchedAtAnno: time.Now().UTC().Format(time.RFC3339Nano)}},
-		"spec":     map[string]any{"containers": []map[string]any{{"name": target.Container, "args": effectiveArgs(cfg)}}},
-	}}})
-	if err != nil {
-		return err
-	}
-	deployment, err := p.client.AppsV1().Deployments(p.namespace).Patch(ctx, target.Deployment, types.StrategicMergePatchType, patch, metav1.PatchOptions{})
-	if err != nil {
-		return fmt.Errorf("patch %s backend Deployment: %w", target.Name, err)
-	}
-	for {
-		if err := ctx.Err(); err != nil {
-			return fmt.Errorf("wait for vLLM rollout: %w", err)
-		}
-		current, err := p.client.AppsV1().Deployments(p.namespace).Get(ctx, target.Deployment, metav1.GetOptions{})
-		if err == nil && current.Status.ObservedGeneration >= deployment.Generation && current.Status.UpdatedReplicas == 1 && current.Status.AvailableReplicas == 1 {
-			if p.backendHealthyAt(ctx, target.URL) {
-				p.lastStart.Store(time.Since(patchedAt).Nanoseconds())
-				p.stateMu.Lock()
-				p.backend = target.URL
-				p.backendName = target.Name
-				p.stateMu.Unlock()
-				if err := p.persistRuntimeMetadata(ctx, cfg); err != nil {
-					p.configErrors.Add(1)
-				}
-				return nil
-			}
-		}
-		select {
-		case <-ctx.Done():
-		case <-time.After(backendProbeWait):
-		}
-	}
-}
-
-func (p *proxy) ensureCached(ctx context.Context, cfg modelConfig) error {
-	if p.cacheManager == nil {
-		return nil
-	}
-	if cfg.Cache.Kind == "" {
-		return fmt.Errorf("model %q has no cache.json", cfg.Name)
-	}
-	body, err := json.Marshal(map[string]any{"model": cfg.Name, "backend": cfg.Backend, "cache": cfg.Cache})
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.cacheManager.ResolveReference(&url.URL{Path: "/v1/ensure"}).String(), bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	// Cache hydration may copy tens of gigabytes from the NAS. The request
-	// context already carries the model-transition deadline; do not reuse the
-	// short timeout intended for backend health and metadata requests.
-	resp, err := (&http.Client{}).Do(req)
-	if err != nil {
-		return fmt.Errorf("ensure cached model %q: %w", cfg.Name, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
-		message, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("ensure cached model %q: %s: %s", cfg.Name, resp.Status, strings.TrimSpace(string(message)))
-	}
-	switch resp.Header.Get("X-LLM-Cache-Result") {
-	case "hot":
-		p.cacheHotHits.Add(1)
-	case "cold":
-		p.cacheColdHits.Add(1)
-	case "external":
-		p.cacheExternal.Add(1)
-	}
-	return nil
-}
-
 // sweepCache keeps the hot volumes below their high-water mark even when no
 // model switch occurs. The manager receives the active artifact key and never
 // evicts it.
@@ -2095,9 +1818,8 @@ func (p *proxy) sweepCache(logger *slog.Logger) {
 	for range ticker.C {
 		p.stateMu.RLock()
 		cfg, ok := p.registry.models[p.active]
-		transitioning := p.transitioning
 		p.stateMu.RUnlock()
-		if !ok || transitioning || cfg.Cache.Kind == "" {
+		if !ok || p.anySwitchInFlight() || cfg.Cache.Kind == "" {
 			continue
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), p.transitionLimit)
@@ -2459,8 +2181,15 @@ func (p *proxy) reverseProxy() *httputil.ReverseProxy {
 
 func (p *proxy) isAvailable() bool {
 	p.stateMu.RLock()
-	defer p.stateMu.RUnlock()
-	return p.active != "" && !p.transitioning
+	active := p.active
+	p.stateMu.RUnlock()
+	return active != "" && !p.anySwitchInFlight()
+}
+
+func (p *proxy) anySwitchInFlight() bool {
+	p.switchMu.Lock()
+	defer p.switchMu.Unlock()
+	return len(p.switchWaiters) > 0
 }
 
 func (p *proxy) respondTransitionError(w http.ResponseWriter, err error) {
@@ -2472,7 +2201,7 @@ func (p *proxy) respondTransitionError(w http.ResponseWriter, err error) {
 		openAIError(w, http.StatusConflict, "server_error", err.Error())
 		return
 	}
-	if errors.Is(err, errTransitioning) || errors.Is(err, errBackendUnavailable) {
+	if errors.Is(err, errBackendUnavailable) {
 		w.Header().Set("Retry-After", "15")
 		openAIError(w, http.StatusServiceUnavailable, "server_error", err.Error())
 		return
@@ -2508,19 +2237,16 @@ func (p *proxy) readyz(w http.ResponseWriter, _ *http.Request) {
 
 func (p *proxy) metrics(w http.ResponseWriter, r *http.Request) {
 	p.stateMu.RLock()
-	active, transitioning, activeSince := p.active, p.transitioning, p.activeSince
+	active, activeSince := p.active, p.activeSince
 	backendType := p.registry.models[active].Backend
 	p.stateMu.RUnlock()
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	if active != "" {
 		fmt.Fprintf(w, "vllm_proxy_active_model_info{model_name=%q} 1\n", active)
 	}
-	fmt.Fprintf(w, "vllm_proxy_transitioning %d\n", boolNumber(transitioning))
+	fmt.Fprintf(w, "vllm_proxy_transitioning %d\n", boolNumber(p.anySwitchInFlight()))
 	fmt.Fprintf(w, "vllm_proxy_switches_total %d\n", p.switchesTotal.Load())
 	fmt.Fprintf(w, "vllm_proxy_config_errors_total %d\n", p.configErrors.Load())
-	fmt.Fprintf(w, "vllm_proxy_model_cache_hits_total{source=\"hot\"} %d\n", p.cacheHotHits.Load())
-	fmt.Fprintf(w, "vllm_proxy_model_cache_hits_total{source=\"cold\"} %d\n", p.cacheColdHits.Load())
-	fmt.Fprintf(w, "vllm_proxy_model_cache_hits_total{source=\"external\"} %d\n", p.cacheExternal.Load())
 	fmt.Fprintf(w, "vllm_proxy_last_switch_duration_seconds %.6f\n", float64(p.lastSwitch.Load())/float64(time.Second))
 	fmt.Fprintf(w, "vllm_proxy_last_startup_duration_seconds %.6f\n", float64(p.lastStart.Load())/float64(time.Second))
 	if !activeSince.IsZero() {
@@ -2661,17 +2387,6 @@ func env(key, fallback string) string {
 		return value
 	}
 	return fallback
-}
-func boolEnv(key string, fallback bool) bool {
-	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" {
-		return fallback
-	}
-	parsed, err := strconv.ParseBool(value)
-	if err != nil {
-		return fallback
-	}
-	return parsed
 }
 func durationEnv(key string, fallback time.Duration) time.Duration {
 	if value, err := time.ParseDuration(os.Getenv(key)); err == nil && value > 0 {

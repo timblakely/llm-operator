@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -60,84 +59,6 @@ func TestSyncActiveDeploymentReconcilesExternalModelChange(t *testing.T) {
 	}
 	if p.active != "gemma" {
 		t.Fatalf("active model = %q, want gemma", p.active)
-	}
-}
-
-func TestReconcileActiveDeploymentCancelsStaleTransition(t *testing.T) {
-	replicas := int32(1)
-	client := fake.NewSimpleClientset(&appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "llm-vllm", Namespace: "home-infra"},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: &replicas,
-			Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "vllm"}}}},
-		},
-	})
-	canceled := make(chan struct{})
-	p := &proxy{
-		client:           client,
-		namespace:        "home-infra",
-		deployment:       "llm-vllm",
-		container:        "vllm",
-		active:           "gemma",
-		transitioning:    true,
-		transitionCancel: func() { close(canceled) },
-		registry: registry{models: map[string]modelConfig{
-			"gemma": {Name: "gemma", ModelSource: "google/gemma"},
-		}},
-	}
-
-	p.reconcileActiveDeployment(slog.New(slog.NewTextHandler(io.Discard, nil)))
-	select {
-	case <-canceled:
-	case <-time.After(time.Second):
-		t.Fatal("stale transition was not canceled")
-	}
-	if !p.reconcilePending {
-		t.Fatal("updated active model was not queued for reconciliation")
-	}
-}
-
-func TestReadOnlyTransitionsDoNotReconcileDeployments(t *testing.T) {
-	zero := int32(0)
-	client := fake.NewSimpleClientset(&appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "llm-vllm", Namespace: "home-infra"},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: &zero,
-			Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "vllm"}}}},
-		},
-	})
-	p := &proxy{
-		client:              client,
-		namespace:           "home-infra",
-		container:           "vllm",
-		active:              "gemma",
-		readOnlyTransitions: true,
-		backends:            map[string]backendConfig{"vllm": {Name: "vllm", Deployment: "llm-vllm", Container: "vllm"}},
-		registry:            registry{models: map[string]modelConfig{"gemma": {Name: "gemma", Backend: "vllm", ModelSource: "google/gemma"}}},
-	}
-
-	p.reconcileActiveDeployment(slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if actions := client.Actions(); len(actions) != 0 {
-		t.Fatalf("read-only reconciliation made Kubernetes calls: %#v", actions)
-	}
-}
-
-func TestSyncActiveDeploymentPreservesInFlightTransition(t *testing.T) {
-	client := fake.NewSimpleClientset(&appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "llm-vllm", Namespace: "home-infra"},
-		Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{
-			Annotations: map[string]string{activeModelAnno: "gemma"},
-		}}},
-	})
-	p := &proxy{
-		client: client, namespace: "home-infra", deployment: "llm-vllm", active: "qwen", transitioning: true,
-		registry: registry{models: map[string]modelConfig{"gemma": {Name: "gemma"}, "qwen": {Name: "qwen"}}},
-	}
-	if err := p.syncActiveDeployment(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if p.active != "qwen" {
-		t.Fatalf("active model = %q, want qwen during transition", p.active)
 	}
 }
 
@@ -195,63 +116,11 @@ func TestSyncActiveDeploymentRejectsMultipleBackends(t *testing.T) {
 	}
 }
 
-func TestTransitionKeepsCurrentBackendRunningWhenTargetIsMissing(t *testing.T) {
-	one := int32(1)
-	client := fake.NewSimpleClientset(&appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "llm-vllm", Namespace: "home-infra"},
-		Spec:       appsv1.DeploymentSpec{Replicas: &one},
-	})
-	p := &proxy{
-		client: client, namespace: "home-infra", backendName: "vllm", transitionLimit: time.Second,
-		backends: map[string]backendConfig{
-			"vllm":      {Name: "vllm", Deployment: "llm-vllm", Container: "vllm"},
-			"llama-cpp": {Name: "llama-cpp", Deployment: "laguna", Container: "laguna"},
-		},
-	}
-	if err := p.transition(context.Background(), modelConfig{Name: "laguna", Backend: "llama-cpp"}); err == nil || !strings.Contains(err.Error(), "get llama-cpp backend Deployment") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	deployment, err := client.AppsV1().Deployments("home-infra").Get(context.Background(), "llm-vllm", metav1.GetOptions{})
-	if err != nil || deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != 1 {
-		t.Fatalf("current backend was changed after failed preflight: deployment=%#v err=%v", deployment, err)
-	}
-}
-
-func TestEnsureActiveCancelsInFlightTransitionForRequestedModel(t *testing.T) {
-	canceled := make(chan struct{})
-	p := &proxy{
-		active:          "qwen",
-		transitioning:   true,
-		transitionModel: "gemma",
-		transitionCancel: func() {
-			close(canceled)
-		},
-		registry: registry{models: map[string]modelConfig{
-			"gemma": {Name: "gemma"},
-			"qwen":  {Name: "qwen"},
-		}},
-	}
-
-	err := p.ensureActive(context.Background(), "qwen")
-	if !errors.Is(err, errTransitioning) {
-		t.Fatalf("ensureActive error = %v, want %v", err, errTransitioning)
-	}
-	select {
-	case <-canceled:
-	case <-time.After(time.Second):
-		t.Fatal("in-flight transition was not canceled")
-	}
-	if !p.reconcilePending {
-		t.Fatal("requested model was not queued for reconciliation")
-	}
-}
-
-func TestReadOnlyTransitionsRequestOperatorHandoffForInactiveModels(t *testing.T) {
+func TestRequestOperatorTransitionPatchesActiveModelForInactiveModels(t *testing.T) {
 	active := activeModelObject(activeModelName, "gemma")
 	p := &proxy{
-		readOnlyTransitions: true,
-		namespace:           "home-infra",
-		dynamic:             newLLMDynamicClient(active),
+		namespace: "home-infra",
+		dynamic:   newLLMDynamicClient(active),
 	}
 	if err := p.requestOperatorTransition(context.Background(), "qwen"); err != nil {
 		t.Fatal(err)
@@ -287,21 +156,38 @@ func TestCoalescedOperatorTransitionSharesOneWaitAcrossConcurrentCallers(t *test
 	var patches atomic.Int32
 	client.PrependReactor("patch", "llmactivemodels", func(clienttesting.Action) (bool, runtime.Object, error) {
 		patches.Add(1)
+		// Hold the leader here briefly so the other simultaneously-released
+		// callers have a deterministic window to register as followers before
+		// this one finishes and deletes the shared wait entry.
+		time.Sleep(20 * time.Millisecond)
 		return false, nil, nil // let the tracker apply the patch as normal
 	})
 
 	p := &proxy{namespace: "home-infra", dynamic: client, transitionLimit: 10 * time.Second}
 
+	// Release all callers at once rather than spawning them in a loop: with a
+	// near-instant fake round trip, a goroutine started (and finished) early
+	// can register as leader and delete itself from switchWaiters before a
+	// later-scheduled goroutine ever checks the map, defeating coalescing not
+	// because it's broken but because the callers never actually overlapped.
 	const callers = 8
 	errs := make([]error, callers)
+	ready := make(chan struct{})
+	start := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(callers)
 	for i := range errs {
 		go func(i int) {
 			defer wg.Done()
+			ready <- struct{}{}
+			<-start
 			errs[i] = p.coalescedOperatorTransition(context.Background(), "qwen")
 		}(i)
 	}
+	for range callers {
+		<-ready
+	}
+	close(start)
 	wg.Wait()
 
 	for i, err := range errs {
@@ -367,6 +253,29 @@ func activeModelObject(name, modelName string) *unstructured.Unstructured {
 		"metadata": map[string]any{"name": name, "namespace": "home-infra"},
 		"spec":     map[string]any{"modelName": modelName},
 	}}
+}
+
+// newStableProxy fills in the Deployment and LLMActiveModel fixtures needed
+// for ensureActive's operator round-trip to resolve modelName as already
+// Stable without attempting a real transition, then returns extra with those
+// fields set. Every inference test that resolves a "model" from the request
+// body now goes through ensureActive, so this replaces the pre-operator-
+// delegation shortcut of just setting proxy.active directly.
+func newStableProxy(modelName string, extra *proxy) *proxy {
+	one := int32(1)
+	extra.client = fake.NewSimpleClientset(&appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "llm-vllm", Namespace: "home-infra"},
+		Spec: appsv1.DeploymentSpec{Replicas: &one, Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{activeModelAnno: modelName},
+		}}},
+	})
+	active := activeModelObject(activeModelName, modelName)
+	active.Object["status"] = map[string]any{"modelName": modelName, "phase": "Stable"}
+	extra.dynamic = newLLMDynamicClient(active)
+	extra.namespace = "home-infra"
+	extra.deployment = "llm-vllm"
+	extra.active = modelName
+	return extra
 }
 
 func newLLMDynamicClient(objects ...runtime.Object) *dynamicfake.FakeDynamicClient {
@@ -492,10 +401,23 @@ func TestInferenceOverlayForwardsBaseModel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	active := activeModelObject(activeModelName, "gemma")
+	active.Object["status"] = map[string]any{"modelName": "gemma", "phase": "Stable"}
+	one := int32(1)
+	deploymentClient := fake.NewSimpleClientset(&appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "llm-vllm", Namespace: "home-infra"},
+		Spec: appsv1.DeploymentSpec{Replicas: &one, Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{activeModelAnno: "gemma"},
+		}}},
+	})
 	p := &proxy{
-		backend: backendURL,
-		active:  "gemma",
-		maxBody: 1 << 20,
+		client:     deploymentClient,
+		backend:    backendURL,
+		active:     "gemma",
+		maxBody:    1 << 20,
+		namespace:  "home-infra",
+		deployment: "llm-vllm",
+		dynamic:    newLLMDynamicClient(active),
 		registry: registry{
 			models: map[string]modelConfig{"gemma": {Name: "gemma"}},
 			overlays: map[string]overlayConfig{"gemma4-agentic": {
@@ -515,32 +437,6 @@ func TestInferenceOverlayForwardsBaseModel(t *testing.T) {
 	kwargs := received["chat_template_kwargs"].(map[string]any)
 	if kwargs["enable_thinking"] != false || kwargs["preserve_thinking"] != true {
 		t.Fatalf("forwarded kwargs = %#v", kwargs)
-	}
-}
-
-func TestDeploymentNeedsActivation(t *testing.T) {
-	replicas := int32(1)
-	cfg := modelConfig{Name: "gemma", ModelSource: "google/gemma", Args: []string{"--host", "0.0.0.0"}}
-	deployment := &appsv1.Deployment{Spec: appsv1.DeploymentSpec{
-		Replicas: &replicas,
-		Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
-			Name: "vllm", Args: effectiveVLLMArgs(cfg),
-		}}}},
-	}}
-	if deploymentNeedsActivation(deployment, "vllm", cfg) {
-		t.Fatal("matching one-replica Deployment should not require activation")
-	}
-
-	zero := int32(0)
-	deployment.Spec.Replicas = &zero
-	if !deploymentNeedsActivation(deployment, "vllm", cfg) {
-		t.Fatal("zero-replica Deployment should require activation")
-	}
-
-	deployment.Spec.Replicas = &replicas
-	deployment.Spec.Template.Spec.Containers[0].Args = []string{"--model", "wrong"}
-	if !deploymentNeedsActivation(deployment, "vllm", cfg) {
-		t.Fatal("Deployment with stale arguments should require activation")
 	}
 }
 
@@ -887,13 +783,26 @@ func TestInferenceForwardsCanonicalModelName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	one := int32(1)
+	deploymentClient := fake.NewSimpleClientset(&appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "llm-vllm", Namespace: "home-infra"},
+		Spec: appsv1.DeploymentSpec{Replicas: &one, Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{activeModelAnno: modelName},
+		}}},
+	})
+	active := activeModelObject(activeModelName, modelName)
+	active.Object["status"] = map[string]any{"modelName": modelName, "phase": "Stable"}
 	p := &proxy{
+		client:  deploymentClient,
 		backend: backendURL,
 		registry: registry{models: map[string]modelConfig{
 			modelName: {Name: modelName},
 		}},
-		active:  modelName,
-		maxBody: 1 << 20,
+		active:     modelName,
+		maxBody:    1 << 20,
+		namespace:  "home-infra",
+		deployment: "llm-vllm",
+		dynamic:    newLLMDynamicClient(active),
 	}
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"`+modelName+`","messages":[]}`))
@@ -971,14 +880,13 @@ func TestInstrumentInferenceRecordsSuccessMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := &proxy{
+	p := newStableProxy(modelName, &proxy{
 		backend: backendURL,
 		registry: registry{models: map[string]modelConfig{
 			modelName: {Name: modelName, Backend: "vllm"},
 		}},
-		active:  modelName,
 		maxBody: 1 << 20,
-	}
+	})
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"`+modelName+`","messages":[]}`))
 	p.instrumentInference(recorder, request)
@@ -1009,14 +917,13 @@ func TestInstrumentInferenceRecordsErrorStatusOnBackendFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := &proxy{
+	p := newStableProxy(modelName, &proxy{
 		backend: backendURL,
 		registry: registry{models: map[string]modelConfig{
 			modelName: {Name: modelName, Backend: "vllm"},
 		}},
-		active:  modelName,
 		maxBody: 1 << 20,
-	}
+	})
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"`+modelName+`","messages":[]}`))
 	p.instrumentInference(recorder, request)

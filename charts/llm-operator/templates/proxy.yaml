@@ -109,7 +109,6 @@ spec:
             - {name: DEFAULT_MODEL, value: {{ required "proxy.defaultModel is required" $proxy.defaultModel | quote }}}
             - {name: PUBLIC_BASE_URL, value: {{ required "proxy.publicBaseURL is required" $proxy.publicBaseURL | quote }}}
             - {name: TRANSITION_TIMEOUT, value: {{ $proxy.transitionTimeout | quote }}}
-            - {name: ENABLE_DEPLOYMENT_MUTATIONS, value: "false"}
             {{- with $proxy.cacheManagerURL }}
             - {name: CACHE_MANAGER_URL, value: {{ . | quote }}}
             {{- end }}
