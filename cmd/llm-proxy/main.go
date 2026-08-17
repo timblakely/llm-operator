@@ -1856,7 +1856,21 @@ func (p *proxy) waitForOperatorTransition(parent context.Context, modelName stri
 	for {
 		specModel, statusModel, phase, message, err := p.operatorTransitionState(ctx)
 		if err != nil {
-			return err
+			// A missing ActiveModel resource or an RBAC/Forbidden response is a
+			// permanent misconfiguration that will never resolve by retrying;
+			// surface it immediately. Any other error (an apiserver hiccup, a
+			// brief connectivity gap) is treated as transient: one failed poll
+			// must not fail an otherwise-succeeding transition, so retry on the
+			// normal poll cadence instead of aborting the wait.
+			if apierrors.IsNotFound(err) || apierrors.IsForbidden(err) {
+				return err
+			}
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("wait for operator transition to %q: %w", modelName, ctx.Err())
+			case <-ticker.C:
+				continue
+			}
 		}
 		if statusModel == modelName && phase == "Stable" {
 			return nil
@@ -2409,7 +2423,21 @@ func (p *proxy) respondTransitionError(w http.ResponseWriter, err error) {
 		openAIError(w, http.StatusServiceUnavailable, "server_error", err.Error())
 		return
 	}
-	openAIError(w, http.StatusGatewayTimeout, "api_error", err.Error())
+	if errors.Is(err, context.DeadlineExceeded) {
+		// Hitting the proxy's own TRANSITION_TIMEOUT wait budget is not proof
+		// the switch failed - the operator may still be progressing it. Ask
+		// the client to retry rather than reporting a hard 504, which reads as
+		// "this request timed out and is over" instead of "still working, come
+		// back".
+		w.Header().Set("Retry-After", "30")
+		openAIError(w, http.StatusServiceUnavailable, "server_error", err.Error())
+		return
+	}
+	// Anything else here is a genuine upstream failure (the operator reported
+	// a failed transition, or a permanent read error such as NotFound/
+	// Forbidden from operatorTransitionState) rather than a timeout the proxy
+	// imposed on itself, so it is reported as a bad gateway, not 504.
+	openAIError(w, http.StatusBadGateway, "api_error", err.Error())
 }
 
 func (p *proxy) healthz(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }

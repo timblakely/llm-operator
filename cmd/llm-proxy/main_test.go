@@ -22,12 +22,14 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
+	clienttesting "k8s.io/client-go/testing"
 )
 
 func TestStatusDataKeyEncodesCRSourceForConfigMap(t *testing.T) {
@@ -1058,5 +1060,66 @@ func TestMetricSamplesDoesNotMatchALongerMetricNameSharingAPrefix(t *testing.T) 
 	values := metricSamples(text, "vllm:prompt_tokens_total")
 	if len(values) != 1 || values[0] != 45 {
 		t.Fatalf("metricSamples = %v, want [45] (must not match the _created variant of a longer metric name)", values)
+	}
+}
+
+func TestWaitForOperatorTransitionRetriesTransientGetErrors(t *testing.T) {
+	active := activeModelObject(activeModelName, "qwen")
+	active.Object["status"] = map[string]any{"modelName": "qwen", "phase": "Stable"}
+	client := newLLMDynamicClient(active)
+
+	attempts := 0
+	client.PrependReactor("get", "llmactivemodels", func(clienttesting.Action) (bool, runtime.Object, error) {
+		attempts++
+		if attempts == 1 {
+			return true, nil, apierrors.NewInternalError(errors.New("etcd blip"))
+		}
+		return false, nil, nil
+	})
+
+	p := &proxy{namespace: "home-infra", dynamic: client, transitionLimit: 10 * time.Second}
+	if err := p.waitForOperatorTransition(context.Background(), "qwen"); err != nil {
+		t.Fatalf("waitForOperatorTransition = %v, want nil (a transient read error must be retried, not fail the wait)", err)
+	}
+	if attempts < 2 {
+		t.Fatalf("attempts = %d, want at least 2 (the transient failure plus a retry that succeeds)", attempts)
+	}
+}
+
+func TestWaitForOperatorTransitionAbortsImmediatelyOnForbidden(t *testing.T) {
+	client := newLLMDynamicClient()
+	attempts := 0
+	client.PrependReactor("get", "llmactivemodels", func(clienttesting.Action) (bool, runtime.Object, error) {
+		attempts++
+		return true, nil, apierrors.NewForbidden(schema.GroupResource{Group: "llm.cogito.dev", Resource: "llmactivemodels"}, activeModelName, errors.New("rbac"))
+	})
+
+	p := &proxy{namespace: "home-infra", dynamic: client, transitionLimit: time.Second}
+	if err := p.waitForOperatorTransition(context.Background(), "qwen"); err == nil {
+		t.Fatal("expected an error for a permanent Forbidden response")
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want exactly 1 (a Forbidden response is a permanent misconfiguration and must not be retried)", attempts)
+	}
+}
+
+func TestRespondTransitionErrorMapsDeadlineExceededToRetryable503(t *testing.T) {
+	p := &proxy{}
+	recorder := httptest.NewRecorder()
+	p.respondTransitionError(recorder, fmt.Errorf("wait for operator transition to %q: %w", "qwen", context.DeadlineExceeded))
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d (hitting the proxy's own wait budget is not proof the switch failed, and must not read as a hard 504)", recorder.Code, http.StatusServiceUnavailable)
+	}
+	if got := recorder.Header().Get("Retry-After"); got == "" {
+		t.Fatal("Retry-After header must be set so a client knows to retry rather than give up")
+	}
+}
+
+func TestRespondTransitionErrorDefaultsToBadGatewayNotGatewayTimeout(t *testing.T) {
+	p := &proxy{}
+	recorder := httptest.NewRecorder()
+	p.respondTransitionError(recorder, errors.New(`operator transition to "qwen" failed: health check failed`))
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d (a reported transition failure is an upstream failure, not a proxy-imposed timeout)", recorder.Code, http.StatusBadGateway)
 	}
 }
