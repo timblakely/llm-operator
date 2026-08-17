@@ -9,7 +9,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	cogitodevv1alpha1 "github.com/timblakely/llm-operator/api/cogito.dev/v1alpha1"
 )
@@ -111,5 +113,101 @@ func TestLLMBackendWorkloadCreatesOwnedObjectsAndPreservesTransitionReplicas(t *
 	}
 	if got := deployment.Spec.Template.Spec.Containers[0].VolumeMounts; len(got) != 1 || got[0].Name != chatTemplateVolumeName || got[0].MountPath != chatTemplateMountDir {
 		t.Fatalf("backend reconcile dropped injected chat-template mount: %#v", got)
+	}
+}
+
+// TestLLMBackendWorkloadPatchesRatherThanReplacesAConcurrentlyModifiedDeployment
+// proves ensureBackendWorkload writes the generated Deployment with a merge
+// Patch, not a full Update: a full Update carries the resourceVersion read at
+// Get time and is rejected outright by a concurrent writer (this is exactly
+// the "the object has been modified" conflict LLMActiveModel's own patches
+// were producing against this reconciler in production), and even a
+// successful full Update would silently discard a field this reconciler
+// never touches. A merge patch does neither.
+func TestLLMBackendWorkloadPatchesRatherThanReplacesAConcurrentlyModifiedDeployment(t *testing.T) {
+	t.Parallel()
+
+	scheme := testScheme(t)
+	one := int32(1)
+	backend := &cogitodevv1alpha1.LLMBackend{
+		ObjectMeta: metav1.ObjectMeta{Name: "owned-vllm", Namespace: "llm"},
+		Spec: cogitodevv1alpha1.LLMBackendSpec{
+			Type: cogitodevv1alpha1.BackendVLLM,
+			Workload: &cogitodevv1alpha1.BackendWorkloadSpec{
+				ContainerName: "runtime",
+				Service:       cogitodevv1alpha1.BackendServiceSpec{Name: "owned-vllm-service", Port: 8000},
+				Deployment: cogitodevv1alpha1.BackendDeploymentSpec{
+					Name:     "owned-vllm-deployment",
+					Replicas: &one,
+					PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+						Name:  "runtime",
+						Image: "example.invalid/vllm@sha256:deadbeef",
+					}}}},
+				},
+			},
+		},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(backend).WithObjects(backend).Build()
+	reconciler := &LLMBackendReconciler{Client: fakeClient, Scheme: scheme}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Name: backend.Name, Namespace: backend.Namespace}}
+	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+
+	// Change the backend spec so the next reconcile has a real diff to write,
+	// not a no-op.
+	var current cogitodevv1alpha1.LLMBackend
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: backend.Name, Namespace: backend.Namespace}, &current); err != nil {
+		t.Fatal(err)
+	}
+	current.Spec.Workload.Deployment.PodTemplate.Spec.Containers[0].Image = "example.invalid/vllm@sha256:cafebabe"
+	if err := fakeClient.Update(context.Background(), &current); err != nil {
+		t.Fatal(err)
+	}
+
+	raced := false
+	intercepted := interceptor.NewClient(fakeClient, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if err := c.Get(ctx, key, obj, opts...); err != nil {
+				return err
+			}
+			deployment, ok := obj.(*appsv1.Deployment)
+			if !ok || raced || deployment.Name != "owned-vllm-deployment" {
+				return nil
+			}
+			raced = true
+			// Simulate LLMActiveModel concurrently patching this same
+			// Deployment's runtime args mid-reconcile, exactly the race this
+			// fix targets: a second, independent writer changes the object
+			// between ensureBackendWorkload's Get and its write.
+			var concurrent appsv1.Deployment
+			if err := c.Get(ctx, key, &concurrent); err != nil {
+				return err
+			}
+			if concurrent.Annotations == nil {
+				concurrent.Annotations = map[string]string{}
+			}
+			concurrent.Annotations[activeModelAnno] = "concurrently-set-model"
+			return c.Update(ctx, &concurrent)
+		},
+	})
+
+	racedReconciler := &LLMBackendReconciler{Client: intercepted, Scheme: scheme}
+	if _, err := racedReconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("Reconcile against a concurrently-modified Deployment = %v, want no conflict (a merge patch must not require an unchanged resourceVersion)", err)
+	}
+
+	var deployment appsv1.Deployment
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "owned-vllm-deployment", Namespace: backend.Namespace}, &deployment); err != nil {
+		t.Fatal(err)
+	}
+	if deployment.Annotations[activeModelAnno] != "concurrently-set-model" {
+		t.Fatalf("activeModelAnno = %q, want the concurrent writer's value to survive a merge patch instead of being clobbered by a full Update", deployment.Annotations[activeModelAnno])
+	}
+	if got := deployment.Spec.Template.Spec.Containers[0].Image; got != "example.invalid/vllm@sha256:cafebabe" {
+		t.Fatalf("image = %q, want the reconciler's own change to still apply alongside the concurrent write", got)
 	}
 }

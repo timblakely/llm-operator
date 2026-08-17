@@ -127,7 +127,12 @@ func (r *LLMBackendReconciler) ensureBackendWorkload(ctx context.Context, backen
 			return fmt.Errorf("create generated service: %w", err)
 		}
 	} else if !reflect.DeepEqual(serviceBefore, &service) {
-		if err := r.Update(ctx, &service); err != nil {
+		// A merge patch, not a full Update, so a concurrent write to a field
+		// this reconcile never touches (for example LLMActiveModel patching
+		// the Deployment's runtime args) cannot land in the read-modify-write
+		// gap between this reconcile's Get and its write and get discarded by
+		// an unrelated full-object overwrite here.
+		if err := r.Patch(ctx, &service, client.MergeFrom(serviceBefore)); err != nil {
 			return fmt.Errorf("update generated service: %w", err)
 		}
 	}
@@ -173,7 +178,11 @@ func (r *LLMBackendReconciler) ensureBackendWorkload(ctx context.Context, backen
 			return fmt.Errorf("create generated deployment: %w", err)
 		}
 	} else if !reflect.DeepEqual(deploymentBefore, &deployment) {
-		if err := r.Update(ctx, &deployment); err != nil {
+		// See the Service patch above: a merge patch avoids racing
+		// LLMActiveModel's own concurrent Patch of this same Deployment
+		// during a transition, which a full Update here could silently
+		// overwrite with a stale read.
+		if err := r.Patch(ctx, &deployment, client.MergeFrom(deploymentBefore)); err != nil {
 			return fmt.Errorf("update generated deployment: %w", err)
 		}
 	}
