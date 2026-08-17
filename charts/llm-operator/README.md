@@ -74,7 +74,9 @@ see [Releasing the Manager Image and Helm Chart](../../docs/releasing.md).
 | `leaderElection.enabled` | `true` | Serialize controller ownership across replicas |
 | `transitions.enabled` | `false` | Permit backend Deployment mutation |
 | `transitions.canaryModels` | `""` | Comma-separated canonical model allowlist when transitions are enabled |
-| `admission.enabled` | `false` | Register validating admission handlers when webhook TLS/configuration is installed |
+| `admission.enabled` | `false` | Provision a self-signed serving cert (cert-manager `Issuer`/`Certificate`), webhook `Service`, and `ValidatingWebhookConfiguration` for LLMModel/LLMBackend, and register the validators |
+| `admission.failurePolicy` | `Fail` | `Fail` rejects a CR write at admission time if the webhook is unreachable; `Ignore` lets the write through unvalidated instead |
+| `admission.port` | `9443` | Webhook server container port |
 | `metrics.service.enabled` | `true` | Create the metrics Service |
 | `cacheManager.url` | empty | Optional standalone cache-manager URL |
 | `resources` | see values | Manager requests and limits |

@@ -1,0 +1,100 @@
+{{- if .Values.admission.enabled }}
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ include "llm-operator.fullname" . }}-selfsigned-issuer
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llm-operator.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "llm-operator.fullname" . }}-serving-cert
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llm-operator.labels" . | nindent 4 }}
+spec:
+  dnsNames:
+    - {{ include "llm-operator.fullname" . }}-webhook-service.{{ .Release.Namespace }}.svc
+    - {{ include "llm-operator.fullname" . }}-webhook-service.{{ .Release.Namespace }}.svc.cluster.local
+  issuerRef:
+    kind: Issuer
+    name: {{ include "llm-operator.fullname" . }}-selfsigned-issuer
+  secretName: {{ include "llm-operator.fullname" . }}-webhook-server-cert
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "llm-operator.fullname" . }}-webhook-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llm-operator.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "llm-operator.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: webhook
+      port: 443
+      targetPort: webhook
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ include "llm-operator.fullname" . }}-validating-webhook-configuration
+  labels:
+    {{- include "llm-operator.labels" . | nindent 4 }}
+  annotations:
+    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ include "llm-operator.fullname" . }}-serving-cert
+webhooks:
+  - name: vllmmodel-v1alpha1.llm.cogito.dev
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: {{ .Values.admission.failurePolicy }}
+    matchPolicy: Equivalent
+    clientConfig:
+      service:
+        name: {{ include "llm-operator.fullname" . }}-webhook-service
+        namespace: {{ .Release.Namespace }}
+        path: /validate-llm-cogito-dev-v1alpha1-llmmodel
+        port: 443
+    rules:
+      - apiGroups: ["llm.cogito.dev"]
+        apiVersions: ["v1alpha1"]
+        resources: ["llmmodels"]
+        operations: ["CREATE", "UPDATE"]
+  - name: vllmbackend-v1alpha1.llm.cogito.dev
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: {{ .Values.admission.failurePolicy }}
+    matchPolicy: Equivalent
+    clientConfig:
+      service:
+        name: {{ include "llm-operator.fullname" . }}-webhook-service
+        namespace: {{ .Release.Namespace }}
+        path: /validate-llm-cogito-dev-v1alpha1-llmbackend
+        port: 443
+    rules:
+      - apiGroups: ["llm.cogito.dev"]
+        apiVersions: ["v1alpha1"]
+        resources: ["llmbackends"]
+        operations: ["CREATE", "UPDATE"]
+  - name: vllmbackend-v1beta1.llm.cogito.dev
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: {{ .Values.admission.failurePolicy }}
+    matchPolicy: Equivalent
+    clientConfig:
+      service:
+        name: {{ include "llm-operator.fullname" . }}-webhook-service
+        namespace: {{ .Release.Namespace }}
+        path: /validate-llm-cogito-dev-v1beta1-llmbackend
+        port: 443
+    rules:
+      - apiGroups: ["llm.cogito.dev"]
+        apiVersions: ["v1beta1"]
+        resources: ["llmbackends"]
+        operations: ["CREATE", "UPDATE"]
+{{- end }}
