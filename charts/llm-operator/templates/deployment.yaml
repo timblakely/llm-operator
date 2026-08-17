@@ -61,11 +61,6 @@ spec:
             - name: healthz
               containerPort: {{ .Values.health.port }}
               protocol: TCP
-            {{- if .Values.admission.enabled }}
-            - name: webhook
-              containerPort: {{ .Values.admission.port }}
-              protocol: TCP
-            {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz
@@ -78,18 +73,6 @@ spec:
             {{- toYaml .Values.health.readinessProbe | nindent 12 }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-          {{- if .Values.admission.enabled }}
-          volumeMounts:
-            - name: webhook-certs
-              mountPath: /tmp/k8s-webhook-server/serving-certs
-              readOnly: true
-          {{- end }}
-      {{- if .Values.admission.enabled }}
-      volumes:
-        - name: webhook-certs
-          secret:
-            secretName: {{ include "llm-operator.fullname" . }}-webhook-server-cert
-      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

@@ -32,16 +32,8 @@ transitions:
   canaryModels: ""
 
 admission:
-  # Registers ValidatingWebhookConfigurations for LLMModel and LLMBackend and
-  # provisions the serving certificate (a dedicated self-signed cert-manager
-  # Issuer scoped to this release) that requires. failurePolicy: Fail means a
-  # bad CR write is rejected at admission time rather than surfacing minutes
-  # into a live transition - but it also means an unreachable webhook blocks
-  # every LLMModel/LLMBackend write until it recovers. Set failurePolicy to
-  # Ignore instead if that tradeoff is undesirable.
+  # Requires a serving certificate and ValidatingWebhookConfiguration.
   enabled: false
-  failurePolicy: Fail
-  port: 9443
 
 metrics:
   bindAddress: ":8081"
