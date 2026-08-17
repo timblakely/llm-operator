@@ -37,3 +37,12 @@ COPY --from=builder /workspace/llm-proxy .
 USER 65532:65532
 
 ENTRYPOINT ["/llm-proxy"]
+
+# The cache manager shares the proxy binary and source revision (it is
+# invoked as "llm-proxy cache-manager"), but needs the official Hugging Face
+# CLI for gated and Xet downloads, which the distroless proxy image cannot
+# carry.
+FROM python:3.12-slim AS cache-manager
+RUN pip install --no-cache-dir huggingface_hub==0.34.4 hf_xet
+COPY --from=builder /workspace/llm-proxy /llm-proxy
+ENTRYPOINT ["/llm-proxy", "cache-manager"]

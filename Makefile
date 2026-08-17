@@ -1,6 +1,7 @@
 # Image URL for building/deploying
 IMG ?= ghcr.io/timblakely/llm-operator:latest
 PROXY_IMG ?= ghcr.io/timblakely/llm-proxy:latest
+CACHE_MANAGER_IMG ?= ghcr.io/timblakely/llm-cache-manager:latest
 
 # CONTROLLER_GEN version
 CONTROLLER_GEN_VERSION := v0.18.0
@@ -48,6 +49,14 @@ proxy-build: ## Build the proxy image.
 .PHONY: proxy-push
 proxy-push: ## Push the proxy image.
 	docker push $(PROXY_IMG)
+
+.PHONY: cache-manager-build
+cache-manager-build: ## Build the cache-manager image.
+	docker build --target cache-manager -t $(CACHE_MANAGER_IMG) .
+
+.PHONY: cache-manager-push
+cache-manager-push: ## Push the cache-manager image.
+	docker push $(CACHE_MANAGER_IMG)
 
 .PHONY: generate
 generate: $(CONTROLLER_GEN) ## Generate deepcopy code.
