@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -289,8 +290,28 @@ func TestEvictionPreservesOtherFileArtifact(t *testing.T) {
 	}
 }
 
+// syncBuffer guards a bytes.Buffer so a test goroutine can read log output
+// (String) while runRecovered's background goroutine is still writing to it
+// through the logger, without the two racing on the same memory.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 func TestRunRecoveredConvertsPanicToLoggedErrorInsteadOfCrashing(t *testing.T) {
-	var buf bytes.Buffer
+	var buf syncBuffer
 	m := &cacheManager{logger: slog.New(slog.NewTextHandler(&buf, nil))}
 
 	m.runRecovered("archive hot", "some-key", func() {
@@ -314,7 +335,7 @@ func TestRunRecoveredConvertsPanicToLoggedErrorInsteadOfCrashing(t *testing.T) {
 }
 
 func TestRunRecoveredRunsFnNormallyWhenNoPanic(t *testing.T) {
-	var buf bytes.Buffer
+	var buf syncBuffer
 	m := &cacheManager{logger: slog.New(slog.NewTextHandler(&buf, nil))}
 	done := make(chan struct{})
 	m.runRecovered("op", "key", func() { close(done) })

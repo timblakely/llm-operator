@@ -201,6 +201,17 @@ type proxy struct {
 
 	capabilityMu        sync.Mutex
 	capabilityDiscovery map[string]bool
+
+	switchMu      sync.Mutex
+	switchWaiters map[string]*switchWait
+}
+
+// switchWait lets concurrent requests targeting the same model share one
+// underlying operator transition instead of each independently patching
+// LLMActiveModel and polling its status.
+type switchWait struct {
+	done chan struct{}
+	err  error
 }
 
 func main() {
@@ -1764,10 +1775,7 @@ func (p *proxy) ensureActive(ctx context.Context, requested string) error {
 			return err
 		}
 		if statusModel != cfg.Name || phase != "Stable" {
-			if err := p.requestOperatorTransition(ctx, cfg.Name); err != nil {
-				return err
-			}
-			if err := p.waitForOperatorTransition(ctx, cfg.Name); err != nil {
+			if err := p.coalescedOperatorTransition(ctx, cfg.Name); err != nil {
 				return err
 			}
 		}
@@ -1826,6 +1834,52 @@ func (p *proxy) ensureActive(ctx context.Context, requested string) error {
 	p.activeSince = time.Now()
 	p.stateMu.Unlock()
 	return nil
+}
+
+// coalescedOperatorTransition shares one Patch+poll of LLMActiveModel across
+// every concurrent request targeting the same model, instead of each
+// independently patching the CR and running its own poll loop. The
+// underlying transition runs on its own context bounded only by
+// transitionLimit, not any individual caller's request context: a canceled
+// or disconnected first caller must not cancel the wait for other callers
+// still depending on the same result.
+func (p *proxy) coalescedOperatorTransition(ctx context.Context, modelName string) error {
+	p.switchMu.Lock()
+	if p.switchWaiters == nil {
+		p.switchWaiters = make(map[string]*switchWait)
+	}
+	if wait, ok := p.switchWaiters[modelName]; ok {
+		p.switchMu.Unlock()
+		select {
+		case <-wait.done:
+			return wait.err
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	wait := &switchWait{done: make(chan struct{})}
+	p.switchWaiters[modelName] = wait
+	p.switchMu.Unlock()
+
+	leaderCtx, cancel := context.WithTimeout(context.Background(), p.transitionLimit)
+	defer cancel()
+	err := p.requestOperatorTransition(leaderCtx, modelName)
+	if err == nil {
+		err = p.waitForOperatorTransition(leaderCtx, modelName)
+	}
+
+	p.switchMu.Lock()
+	delete(p.switchWaiters, modelName)
+	p.switchMu.Unlock()
+	wait.err = err
+	close(wait.done)
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return err
+	}
 }
 
 // requestOperatorTransition keeps the proxy read-only with respect to

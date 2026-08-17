@@ -14,6 +14,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -274,6 +276,69 @@ func TestWaitForOperatorTransitionReturnsWhenStable(t *testing.T) {
 	}
 	if err := p.waitForOperatorTransition(context.Background(), "qwen"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCoalescedOperatorTransitionSharesOneWaitAcrossConcurrentCallers(t *testing.T) {
+	active := activeModelObject(activeModelName, "qwen")
+	active.Object["status"] = map[string]any{"modelName": "qwen", "phase": "Stable"}
+	client := newLLMDynamicClient(active)
+
+	var patches atomic.Int32
+	client.PrependReactor("patch", "llmactivemodels", func(clienttesting.Action) (bool, runtime.Object, error) {
+		patches.Add(1)
+		return false, nil, nil // let the tracker apply the patch as normal
+	})
+
+	p := &proxy{namespace: "home-infra", dynamic: client, transitionLimit: 10 * time.Second}
+
+	const callers = 8
+	errs := make([]error, callers)
+	var wg sync.WaitGroup
+	wg.Add(callers)
+	for i := range errs {
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = p.coalescedOperatorTransition(context.Background(), "qwen")
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("caller %d: coalescedOperatorTransition = %v, want nil", i, err)
+		}
+	}
+	if got := patches.Load(); got != 1 {
+		t.Fatalf("LLMActiveModel patch calls = %d, want exactly 1 - concurrent callers targeting the same model must share one underlying transition, not each patch and poll independently", got)
+	}
+}
+
+func TestCoalescedOperatorTransitionPropagatesFailureToAllWaiters(t *testing.T) {
+	active := activeModelObject(activeModelName, "qwen")
+	client := newLLMDynamicClient(active)
+	client.PrependReactor("get", "llmactivemodels", func(clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(schema.GroupResource{Group: "llm.cogito.dev", Resource: "llmactivemodels"}, activeModelName, errors.New("rbac"))
+	})
+
+	p := &proxy{namespace: "home-infra", dynamic: client, transitionLimit: time.Second}
+
+	const callers = 4
+	errs := make([]error, callers)
+	var wg sync.WaitGroup
+	wg.Add(callers)
+	for i := range errs {
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = p.coalescedOperatorTransition(context.Background(), "qwen")
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err == nil {
+			t.Fatalf("caller %d: expected the shared transition's failure to propagate to every waiter", i)
+		}
 	}
 }
 
